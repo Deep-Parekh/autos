@@ -61,7 +61,7 @@ const binarySchema = z.strictObject({ binary: z.string().min(1), auth_profile: i
 export const configSchema = z.strictObject({
   schema_version: z.literal(1),
   jira: z.strictObject({
-    site_url: siteUrlSchema, saved_filter_id: z.string().regex(/^[0-9]+$/),
+    site_url: siteUrlSchema, saved_filter_id: z.union([z.string().regex(/^[0-9]+$/), z.number().int().positive().max(Number.MAX_SAFE_INTEGER).transform((id) => String(id))]), // YAML may give 12345 or '12345'
     allowed_projects: z.array(projectKeySchema).min(1), /** Optional extra restriction on issue type. Absent: every issue in the saved filter is eligible (the filter decides). */
     intake_types: z.array(z.string().min(1)).min(1).optional(),
     acceptance_criteria_fields: z.array(z.string().regex(/^customfield_[0-9]+$/)).default([]),

@@ -99,3 +99,11 @@ test('jobs.rate_limit_pause defaults and bounds', () => {
     assert.throws(() => parseConfig(bad), (error: unknown) => error instanceof AutosError && error.code === 'INVALID_CONFIG');
   }
 });
+
+test('saved_filter_id accepts a quoted string or a bare YAML number', () => {
+  const quoted = parseConfigYaml(text.replace(/saved_filter_id: .*/, "saved_filter_id: '12345'"));
+  const bare = parseConfigYaml(text.replace(/saved_filter_id: .*/, 'saved_filter_id: 12345'));
+  assert.equal(quoted.jira.saved_filter_id, '12345');
+  assert.equal(bare.jira.saved_filter_id, '12345');
+  assert.throws(() => parseConfigYaml(text.replace(/saved_filter_id: .*/, 'saved_filter_id: -5')), (e: unknown) => e instanceof AutosError && e.code === 'INVALID_CONFIG');
+});

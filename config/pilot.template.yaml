@@ -56,6 +56,13 @@ providers:
 agents:
   # Fallbacks run in order after AUTH/RATE_LIMIT/UPSTREAM/UNAVAILABLE/TIMEOUT/INVALID_OUTPUT/CONTEXT failures.
   # Each role tries all three subscriptions before blocking; profiles decide subscription vs API billing.
+  # Models: add `model:` to a role (its primary provider) and/or to any fallback entry. Autos passes it as --model.
+  # Omit it to use the CLI's default for your plan. Claude accepts aliases (opus, sonnet, haiku) or full ids
+  # (e.g. claude-opus-5-5); Codex accepts the names its `/model` picker shows for your ChatGPT plan; Cursor is always auto.
+  # Names are only checked for format here; `providers test` or the first call reveals an unavailable model. Example:
+  #   swe:      {provider: claude, model: opus,   timeout_ms: 1800000, fallbacks: [{provider: codex, model: <codex-model>}, {provider: cursor}]}
+  #   qa:       {provider: codex,  model: <codex-model>, timeout_ms: 900000, fallbacks: [{provider: claude, model: sonnet}]}
+  #   reviewer: {provider: claude, model: opus,   timeout_ms: 900000,  fallbacks: [{provider: codex, model: <codex-model>}]}
   swe: {provider: claude, timeout_ms: 1800000, fallbacks: [{provider: codex}, {provider: cursor}]}
   qa: {provider: codex, timeout_ms: 900000, fallbacks: [{provider: claude}, {provider: cursor}]}
   reviewer: {provider: claude, timeout_ms: 900000, fallbacks: [{provider: codex}, {provider: cursor}]}    # fresh session, independent of SWE
