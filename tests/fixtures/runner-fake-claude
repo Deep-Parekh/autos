@@ -1,0 +1,28 @@
+#!/usr/local/bin/node
+const { existsSync, readFileSync, writeFileSync } = require('node:fs');
+const { resolve } = require('node:path');
+
+// Real `claude -p` reads the prompt from stdin; older adapters passed it as the last argument. Accept both.
+let prompt = process.argv.at(-1) ?? '';
+try { prompt += `\n${readFileSync(0, 'utf8')}`; } catch { /* no stdin */ }
+const source = '/workspace/src/App.java';
+let sourceWrite = 'not-attempted';
+let gitWrite = 'not-attempted';
+if (prompt.includes('ROLE=swe')) {
+  writeFileSync(source, 'class App { int answer() { return 42; } }\n');
+  sourceWrite = 'allowed';
+  try { writeFileSync('/workspace/.git/config', 'credential=should-not-write'); gitWrite = 'unexpectedly-allowed'; }
+  catch { gitWrite = 'denied'; }
+} else {
+  try { writeFileSync(source, 'should-not-be-written'); sourceWrite = 'unexpectedly-allowed'; }
+  catch { sourceWrite = 'denied'; }
+}
+const environment = Object.keys(process.env).filter((name) => /TOKEN|GIT_|CONTROLLER|BITBUCKET/i.test(name));
+const result = { sourceWrite, gitWrite, dockerSocket: existsSync('/var/run/docker.sock'), credentialEnvironmentNames: environment, source: readFileSync(resolve(source), 'utf8') };
+const stream = [
+  { type: 'system', subtype: 'init', session_id: 'fake-session', cwd: '/workspace', tools: ['Read', 'Edit'] },
+  { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_fake1', name: 'Read', input: { file_path: source } }] } },
+  { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_fake1', content: 'fake file contents' }] } },
+  { type: 'result', subtype: 'success', is_error: false, result: JSON.stringify(result) },
+];
+for (const line of stream) process.stdout.write(`${JSON.stringify(line)}\n`);

@@ -1,0 +1,103 @@
+# Server configuration template (Ubuntu host: controller in Compose, supervisor under systemd).
+#   cp config/server.template.yaml /opt/autos/config/config.yaml   (config/config.yaml is git-ignored)
+# See docs/server-setup.md. Differences from the local pilot template: https remote with the askpass token,
+# a 300 s poll, and comments on scaling and push.
+# Replace every REPLACE_ME value, then validate:
+#   node --conditions=development --import tsx scripts/validate-config.ts config/config.yaml
+# This file holds NO secrets. *_env fields name environment variables; set their values in .env (see .env.example).
+schema_version: 1
+
+jira:
+  site_url: https://REPLACE_ME.atlassian.net        # Cloud site root only: https, no path
+  saved_filter_id: 'REPLACE_ME'                       # numeric ID from the filter URL (...?filter=12345)
+  allowed_projects: [REPLACE_ME]                      # e.g. [WTS]; must match Confluence branch-map rows
+  intake_types: [Bug]
+  acceptance_criteria_fields: []                      # e.g. [customfield_10050] if criteria live in a custom field
+  read_only: true
+  poll_seconds: 300
+  # Start with false: the controller then only runs tickets you submit (autos run KEY). Set true after a
+  # supervised dry run and one real ticket to let it work through the filter on its own.
+  auto_poll: false
+  max_new_per_poll: 5                                 # new tickets admitted per poll
+  username_env: AUTOS_ATLASSIAN_EMAIL
+  token_env: AUTOS_ATLASSIAN_TOKEN
+
+confluence:
+  site_url: https://REPLACE_ME.atlassian.net
+  branch_map_page_id: 'REPLACE_ME'                    # page built from Confluence_Project_Branch_Mapping_Template.md
+  read_only: true
+  username_env: AUTOS_ATLASSIAN_EMAIL
+  token_env: AUTOS_ATLASSIAN_TOKEN
+
+bitbucket:
+  allowed_repositories:
+    - workspace: REPLACE_ME                           # Bitbucket workspace slug
+      repository_slug: REPLACE_ME
+      # Exactly https://bitbucket.org/<workspace>/<slug>.git (no credentials in the URL). The controller
+      # authenticates through /etc/autos/git/askpass.sh + bitbucket-token (deploy/git/askpass.sh).
+      remote_url: https://bitbucket.org/REPLACE_ME/REPLACE_ME.git
+      protected_branches: [main, develop]
+      build_profile: pilot-java
+      allowed_paths: [src/**, pom.xml]                # paths the SWE role may change
+      prohibited_paths: [src/main/resources/secrets/**]
+  push_feature_branch: false                          # enable after reviewed READY_FOR_HUMAN runs; token then needs Write
+  create_pull_request: false
+  # read_token_env: AUTOS_BITBUCKET_READ_TOKEN        # optional: enables similar-fix (precedent) lookup
+
+git:
+  branch_template: deep/{issueKey}
+  no_rebase: true
+  no_force_push: true
+  refuse_existing_feature_branch: true
+
+providers:
+  claude: {binary: claude, auth_profile: pilot}       # auth_profile = top-level key in provider-profiles.json
+  codex: {binary: codex, auth_profile: pilot}
+  cursor: {binary: cursor-agent, auth_profile: pilot} # Cursor CLI (installed as agent/cursor-agent); model is always "auto"
+
+agents:
+  # Fallbacks run in order after AUTH/RATE_LIMIT/UPSTREAM/UNAVAILABLE/TIMEOUT/INVALID_OUTPUT/CONTEXT failures.
+  # Each role tries all three subscriptions before blocking; profiles decide subscription vs API billing.
+  swe: {provider: claude, timeout_ms: 1800000, fallbacks: [{provider: codex}, {provider: cursor}]}
+  qa: {provider: codex, timeout_ms: 900000, fallbacks: [{provider: claude}, {provider: cursor}]}
+  reviewer: {provider: claude, timeout_ms: 900000, fallbacks: [{provider: codex}, {provider: cursor}]}    # fresh session, independent of SWE
+
+jobs:
+  # Concurrent tickets (slots, 1–8). Start with 1; raise per host size and provider limits (docs/local-pilot.md).
+  max_parallel: 1
+  # Concurrent build/test runs across all tickets; must be <= max_parallel. Builds are the heaviest step.
+  max_concurrent_checks: 1
+  max_repair_rounds: 2
+  # Disk hygiene: workspaces of BLOCKED/CANCELLED/superseded attempts are removed after this many hours.
+  # The latest READY_FOR_HUMAN workspace stays until you run `autos close <KEY> --merged|--abandoned`.
+  workspace_retention_hours: 72
+  auto_prune_workspaces: true
+  similar_tickets: {enabled: true, max_candidates: 5}
+
+build_profiles:
+  pilot-java:
+    jdk: '17'
+    checks:
+      # Checks run in autos-checks:local with NO network: Maven must run offline against the
+      # preloaded cache mounted from AUTOS_MAVEN_CACHE_ROOT.
+      - executable: mvn
+        args: [-o, --batch-mode, -Dmaven.repo.local=/opt/autos/m2/repository, test]
+        timeout_ms: 1200000
+        required: true
+
+security:
+  allow_jira_write: false
+  allow_confluence_write: false
+  allow_merge: false
+  allow_deploy: false
+  allow_prod_db: false
+
+storage:
+  data_dir: data
+  artifacts_dir: artifacts
+  workspaces_dir: workspaces
+
+api:
+  listen_host: 127.0.0.1
+  port: 8787
+  operator_token_env: AUTOS_OPERATOR_TOKEN

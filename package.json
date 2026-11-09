@@ -1,0 +1,29 @@
+{
+  "name": "autos",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b && tsc -p tsconfig.test.json --noEmit",
+    "test": "node scripts/test.mjs",
+    "check": "npm run typecheck && npm test && npm run config:validate && npm run docs:validate && npm run docs:lint",
+    "config:validate": "node --conditions=development --import tsx scripts/validate-config.ts config/config.example.yaml",
+    "docs:validate": "node apps/cli/bin/autos.mjs docs validate",
+    "docs:lint": "REDOCLY_TELEMETRY=off redocly lint --config redocly.yaml docs/openapi.yaml",
+    "scenario:synthetic": "node --conditions=development --import tsx scripts/synthetic-scenario.ts"
+  },
+  "devDependencies": {
+    "@redocly/cli": "2.76.0",
+    "@types/node": "22.18.6",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

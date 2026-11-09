@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+.DS_Store
+.env
+.env.*
+!.env.example
+config/config.yaml
+config/provider-profiles.json
+config/supervisor.local.json
+data/
+artifacts/
+workspaces/
+*.log

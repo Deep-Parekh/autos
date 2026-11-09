@@ -1,0 +1,13 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/atlassian" },
+    { "path": "packages/cli-adapters" },
+    { "path": "packages/git-runner" },
+    { "path": "packages/workflow" },
+    { "path": "packages/runner" },
+    { "path": "apps/controller" },
+    { "path": "apps/cli" }
+  ]
+}

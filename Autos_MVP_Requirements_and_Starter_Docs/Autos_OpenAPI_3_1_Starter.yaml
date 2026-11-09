@@ -1,0 +1,342 @@
+openapi: 3.1.0
+info:
+  title: Autos Controller API
+  version: 0.1.0
+  description: >-
+    Planned local-only HTTP contract for the Autos personal SWE agent prototype.
+    This is a design artifact, not a deployed or implemented API. The API
+    controls read-only Jira intake and local agent jobs. It exposes no
+    Jira/Confluence write, pull-request merge, rebase, or deployment operations.
+  license:
+    name: License TBD before external distribution
+servers:
+  - url: http://127.0.0.1:8787
+    description: Local developer/controller host only; no public ingress
+security:
+  - operatorBearer: []
+tags:
+  - name: Health
+    description: Minimal local health information
+  - name: Providers
+    description: Installed CLI provider readiness
+  - name: Configuration
+    description: Redacted project mapping metadata
+  - name: Queue
+    description: Personal Jira intake queue and local state
+  - name: Jobs
+    description: Job execution, status, cancellation, and handoff artifacts
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Check controller health
+      operationId: getHealth
+      security: []
+      responses:
+        '200':
+          description: Controller is available
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example: {status: ok, version: 0.1.0}
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/providers:
+    get:
+      tags: [Providers]
+      summary: List available coding CLI adapters without revealing account details
+      operationId: listProviders
+      responses:
+        '200':
+          description: Configured provider adapters
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/ProviderStatus'}
+              example:
+                items:
+                  - {name: claude, available: true, ready: true}
+                  - {name: codex, available: true, ready: true}
+                  - {name: cursor, available: true, ready: false}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/projects:
+    get:
+      tags: [Configuration]
+      summary: List allowed project mappings, with no secrets
+      operationId: listProjects
+      responses:
+        '200':
+          description: Allowed project routing summary
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/ProjectMapping'}
+              example:
+                items:
+                  - project_key: SAMPLE
+                    repository: example-repository
+                    development_branch: develop
+                    sandbox_branch: sandbox
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/queue:
+    get:
+      tags: [Queue]
+      summary: List selected Jira tickets and local processing status
+      operationId: listQueue
+      parameters:
+        - in: query
+          name: limit
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+        - in: query
+          name: cursor
+          schema: {type: string}
+      responses:
+        '200':
+          description: Local queue view, Jira remains unmodified
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/QueueItem'}
+                  next_cursor: {type: [string, 'null']}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+  /v1/jobs:
+    post:
+      tags: [Jobs]
+      summary: Queue a dry-run or implementation job for an existing Jira issue
+      operationId: createJob
+      description: >-
+        Reads Jira and Confluence, and optionally starts an isolated Git
+        workspace. Never modifies Jira or Confluence. Successful non-dry-run
+        jobs may commit and optionally push an agent feature branch according
+        to the configured policy. No automatic PR or rebase.
+      parameters:
+        - in: header
+          name: X-Request-ID
+          description: Optional caller correlation ID
+          schema: {type: string, maxLength: 128}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateJobRequest'}
+            example: {issue_key: SAMPLE-123, dry_run: true}
+      responses:
+        '202':
+          description: Request accepted into local queue
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CreateJobResponse'}
+              example: {job_id: 432c5a6a-043a-4ad6-894c-5330ea7d06bc, status: QUEUED}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '422': {$ref: '#/components/responses/Unprocessable'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+    get:
+      tags: [Jobs]
+      summary: List local job runs
+      operationId: listJobs
+      parameters:
+        - in: query
+          name: limit
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
+      responses:
+        '200':
+          description: Job summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Job'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/jobs/{jobId}:
+    get:
+      tags: [Jobs]
+      summary: Get a job, current stage, and Git handoff metadata
+      operationId: getJob
+      parameters:
+        - {$ref: '#/components/parameters/jobId'}
+      responses:
+        '200':
+          description: Job details
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Job'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/jobs/{jobId}/artifacts:
+    get:
+      tags: [Jobs]
+      summary: Get a sanitized manifest of local job artifacts
+      operationId: getJobArtifacts
+      parameters:
+        - {$ref: '#/components/parameters/jobId'}
+      responses:
+        '200':
+          description: Manifest metadata, not arbitrary filesystem access
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArtifactManifest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/jobs/{jobId}/cancel:
+    post:
+      tags: [Jobs]
+      summary: Request cooperative cancellation of a queued or running job
+      operationId: cancelJob
+      parameters:
+        - {$ref: '#/components/parameters/jobId'}
+      responses:
+        '202':
+          description: Cancellation requested; status must be polled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [job_id, status]
+                properties:
+                  job_id: {type: string, format: uuid}
+                  status: {type: string, enum: [CANCELLING, CANCELLED]}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+components:
+  securitySchemes:
+    operatorBearer:
+      type: http
+      scheme: bearer
+      description: Personal controller operator token; local/VPN access only
+  parameters:
+    jobId:
+      in: path
+      name: jobId
+      required: true
+      schema: {type: string, format: uuid}
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, version]
+      properties:
+        status: {type: string, enum: [ok, degraded]}
+        version: {type: string}
+    ProviderStatus:
+      type: object
+      required: [name, available, ready]
+      properties:
+        name: {type: string, enum: [claude, codex, cursor]}
+        available: {type: boolean}
+        ready: {type: boolean}
+    ProjectMapping:
+      type: object
+      required: [project_key, repository, development_branch]
+      properties:
+        project_key: {type: string}
+        repository: {type: string}
+        development_branch: {type: string}
+        sandbox_branch: {type: [string, 'null']}
+    QueueItem:
+      type: object
+      required: [issue_key, local_status]
+      properties:
+        issue_key: {type: string, pattern: '^[A-Z][A-Z0-9]+-[0-9]+$'}
+        summary: {type: string}
+        local_status: {type: string}
+    CreateJobRequest:
+      type: object
+      additionalProperties: false
+      required: [issue_key]
+      properties:
+        issue_key: {type: string, pattern: '^[A-Z][A-Z0-9]+-[0-9]+$'}
+        dry_run: {type: boolean, default: true}
+        include_similar_tickets: {type: boolean, default: true}
+    CreateJobResponse:
+      type: object
+      required: [job_id, status]
+      properties:
+        job_id: {type: string, format: uuid}
+        status: {type: string, enum: [QUEUED]}
+    Job:
+      type: object
+      required: [job_id, issue_key, status, dry_run]
+      properties:
+        job_id: {type: string, format: uuid}
+        issue_key: {type: string}
+        status:
+          type: string
+          enum: [QUEUED, INVESTIGATING, IMPLEMENTING, QA, REVIEW, REVISING, READY_FOR_HUMAN, BLOCKED, CANCELLING, CANCELLED]
+        dry_run: {type: boolean}
+        development_branch: {type: [string, 'null']}
+        base_sha: {type: [string, 'null']}
+        feature_branch: {type: [string, 'null']}
+        commit_sha: {type: [string, 'null']}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ArtifactManifest:
+      type: object
+      required: [job_id, files]
+      properties:
+        job_id: {type: string, format: uuid}
+        files:
+          type: array
+          items:
+            type: object
+            required: [name, media_type]
+            properties:
+              name: {type: string, description: Basename only; no paths or secrets}
+              media_type: {type: string}
+              sha256: {type: [string, 'null']}
+    Problem:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code: {type: string, example: INVALID_ISSUE_KEY}
+        message: {type: string, example: Invalid Jira issue key}
+        request_id: {type: string, example: local-abc123}
+        details: {type: [object, 'null'], additionalProperties: true}
+  responses:
+    BadRequest:
+      description: Invalid request
+      content: {application/json: {schema: {$ref: '#/components/schemas/Problem'}}}
+    Unauthorized:
+      description: Operator authentication required
+      content: {application/json: {schema: {$ref: '#/components/schemas/Problem'}}}
+    Forbidden:
+      description: Project or operation not permitted
+      content: {application/json: {schema: {$ref: '#/components/schemas/Problem'}}}
+    NotFound:
+      description: Job or resource not found
+      content: {application/json: {schema: {$ref: '#/components/schemas/Problem'}}}
+    Conflict:
+      description: Duplicate active job, branch collision, or invalid state
+      content: {application/json: {schema: {$ref: '#/components/schemas/Problem'}}}
+    Unprocessable:
+      description: Missing branch mapping or unsupported issue
+      content: {application/json: {schema: {$ref: '#/components/schemas/Problem'}}}
+    TooManyRequests:
+      description: Local job concurrency or provider quota exceeded
+      content: {application/json: {schema: {$ref: '#/components/schemas/Problem'}}}
+    ServiceUnavailable:
+      description: Unhealthy controller
+      content: {application/json: {schema: {$ref: '#/components/schemas/Problem'}}}

@@ -1,0 +1,10 @@
+{
+  "pilot": {
+    "claude": { "mode": "api", "env": { "ANTHROPIC_API_KEY": "REPLACE_ME_sk-ant-..." } },
+    "codex": { "mode": "api", "env": { "OPENAI_API_KEY": "REPLACE_ME_sk-..." } },
+    "cursor": { "mode": "subscription", "env": { "CURSOR_API_KEY": "REPLACE_ME_cursor_dashboard_user_api_key" } }
+  },
+  "local": {
+    "claude": { "mode": "local", "env": { "ANTHROPIC_BASE_URL": "http://REPLACE_ME_model_gateway:4000", "ANTHROPIC_AUTH_TOKEN": "REPLACE_ME_optional_gateway_token" } }
+  }
+}

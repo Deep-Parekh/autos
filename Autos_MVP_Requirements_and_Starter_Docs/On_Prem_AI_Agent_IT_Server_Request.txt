@@ -1,0 +1,34 @@
+AUTOS ON-PREM AI SWE AGENT MVP - IT SERVER REQUEST (REVISION 3)
+
+Request a dedicated, always-on internal Linux VM or physical server to host a Dockerized, personal AI software-engineering prototype, fully independent of my MacBook. The workload runs the Dockerized Autos controller and reads an existing private Jira filter and a read-only Confluence page mapping Jira projects to Bitbucket repositories and development/sandbox branches. It checks out a clean copy of the correct development branch, runs Claude Code / Codex / Cursor agents against isolated Java/Struts/JS workspaces, executes Maven and frontend tests, and produces a committed feature branch named deep/<FULL_JIRA_KEY> for my manual review and rebase. Optionally, after checks pass, it pushes only this feature branch to Bitbucket.
+
+NO AUTOMATED CHANGES TO: Jira tickets, Confluence pages, Bitbucket pull requests, protected development/release branches, or production systems. No automatic rebase, merge, publication, or deployment. Confluence is read-only for the MVP.
+
+RECOMMENDED ALLOCATION
+- OS: supported Ubuntu Server LTS (amd64/x86-64) or approved equivalent.
+- CPU: 8 vCPU, sustained performance for Java compilation and test runs.
+- RAM: 32 GB; option for 64 GB if future parallel builds are needed.
+- Disk: 500 GB usable encrypted SSD/NVMe, expandable.
+- Docker Engine + Compose v2; host supervisor can start disposable non-root job containers. Autos CLI is built and packaged with the stack.
+- GPU: not required initially; cloud coding CLIs provide inference.
+- Network: always-on outbound HTTPS to approved Atlassian/Bitbucket, coding-model endpoints, container registries and required Maven/npm repositories; respect proxy, DNS and internal CA.
+- Inbound: VPN/internal SSH administration only; no public application ports required. The private OpenAPI-documented Autos HTTP controller binds to loopback unless specifically approved.
+- Reliability: automatic service startup after reboot, storage/backups, log rotation, patch owner and monitoring.
+- Privileges: dedicated non-root service identity for platform; no production database/deployment access; no credentials in agent job workspace.
+- Capacity: one ticket job at a time, isolated checkout and runner per job.
+
+OPTIONAL REDUCED EVALUATION HOST: 4 vCPU / 16 GB RAM / 250 GB SSD, subject to Java build tests. Full pilot preference is 8/32/500.
+
+IT ACCEPTANCE
+[ ] Docker Compose stack and one disposable runner operate after restart.
+[ ] JDK 17/21 Maven-based sample WAR compiles on the runner.
+[ ] Required outbound endpoints and approved artifact registries work.
+[ ] SSH restricted to internal VPN; no public inbound ports.
+[ ] Encryption, backups, monitoring, logging and OS patch ownership documented.
+[ ] No access to production systems or credentials required.
+
+The software and integrations can be built and tested locally before this server is provisioned. This request is for hosting and validation of the finished MVP, not for managed cloud inference or an on-prem GPU.
+
+APPLICATION DOCUMENTATION
+- Autos CLI commands: autos init, autos doctor, autos providers test --all, autos run, autos docs validate.
+- Local controller HTTP API documented with OpenAPI 3.1 at docs/openapi.yaml; this is NOT a public internet service in MVP.

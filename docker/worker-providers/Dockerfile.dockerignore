@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+**/dist
+.git
+data
+artifacts
+workspaces
+*.log
+.env
+.env.*
+config/config.yaml
+**/*.pem
+**/*.key
+**/*.tsbuildinfo

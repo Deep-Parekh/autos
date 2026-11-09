@@ -1,0 +1,68 @@
+# Example configuration for a FUTURE autos implementation; not an installed product.
+instance:
+  name: autos-personal
+  concurrency: 1
+  storage: sqlite
+
+jira:
+  site_url: https://YOUR-SITE.atlassian.net
+  saved_filter_id: REPLACE_FILTER_ID
+  read_only: true
+  poll_seconds: 300
+
+confluence:
+  site_url: https://YOUR-SITE.atlassian.net
+  branch_map_page_id: REPLACE_PAGE_ID
+  read_only: true
+
+bitbucket:
+  workspace_allowlist: [REPLACE_WORKSPACE]
+  push_feature_branch: true
+  create_pull_request: false
+
+repositories:
+  branch_mapping_source: confluence
+  branch_template: deep/{issueKey}
+  require_remote_dev_branch: true
+  refuse_existing_feature_branch: true
+  auto_rebase: false
+  auto_merge: false
+  force_push: false
+  default_build_profile: java-tomcat
+
+jobs:
+  intake_types: [Bug]
+  similar_tickets:
+    enabled: true
+    max_candidates: 5
+    strategy: jira-keyword-and-linked-issues
+  max_repair_rounds: 2
+  fail_if_tests_fail: true
+  summary_location: artifacts/{issueKey}/implementation.md
+
+agents:
+  swe:
+    provider: claude
+  qa:
+    provider: codex
+  reviewer:
+    provider: cursor
+  installed_providers: [claude, codex, cursor]
+  honor_repository_agents_md: true
+
+security:
+  jira_write: false
+  confluence_write: false
+  create_pr: false
+  merge: false
+  deploy: false
+  allow_prod_db: false
+  enable_destructive_commands: false
+
+# Local controller HTTP API is NOT publicly exposed in MVP.
+api:
+  listen_host: 127.0.0.1
+  port: 8787
+  openapi_path: docs/openapi.yaml
+  require_operator_auth: true
+  docs_preview_local_only: true

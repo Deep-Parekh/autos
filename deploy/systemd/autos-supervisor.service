@@ -1,0 +1,36 @@
+# Trusted runner supervisor: the only Autos process with Docker access.
+# Install: sudo cp deploy/systemd/autos-supervisor.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#          sudo systemctl enable --now autos-supervisor
+[Unit]
+Description=Autos trusted runner supervisor
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=autos
+Group=autos
+# The autos user must be in the docker group (Docker access is equivalent to root on the host; this is why the
+# supervisor exposes only fixed job actions over a 0600 socket and agent containers never get the socket).
+SupplementaryGroups=docker
+WorkingDirectory=/opt/autos
+# systemd reads this root-only file before dropping to the autos user; the script then skips its own env file.
+EnvironmentFile=/etc/autos/supervisor.env
+Environment=AUTOS_SUPERVISOR_ENV_FILE=none
+# Storage directories are git-ignored; create them before the sandbox below needs them.
+ExecStartPre=/usr/bin/install -d -m 0700 /opt/autos/data /opt/autos/artifacts /opt/autos/workspaces /opt/autos/auth-staging
+ExecStart=/opt/autos/scripts/pilot-supervisor.sh
+# Give in-flight role/check containers time to be stopped cleanly.
+TimeoutStopSec=90
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+# auth-staging: per-run Codex login copies (bind-mounted by Docker, so not in the private /tmp).
+# codex-pilot: refreshed Codex auth.json is written back here (/etc is otherwise read-only under ProtectSystem=full).
+ReadWritePaths=-/opt/autos/data -/opt/autos/artifacts -/opt/autos/workspaces -/opt/autos/auth-staging -/etc/autos/auth/codex-pilot
+
+[Install]
+WantedBy=multi-user.target

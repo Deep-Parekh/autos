@@ -1,0 +1,79 @@
+# Synthetic configuration; supply real IDs and environment references for a pilot.
+# This file contains no credentials. Environment-variable names are references only.
+schema_version: 1
+jira:
+  site_url: https://example.atlassian.net
+  saved_filter_id: '12345'
+  allowed_projects: [SAMPLE]
+  intake_types: [Bug]
+  # Jira custom field IDs, if your site stores acceptance criteria separately.
+  acceptance_criteria_fields: []
+  read_only: true
+  poll_seconds: 300
+  username_env: AUTOS_ATLASSIAN_EMAIL
+  token_env: AUTOS_ATLASSIAN_TOKEN
+confluence:
+  site_url: https://example.atlassian.net
+  branch_map_page_id: '67890'
+  read_only: true
+  username_env: AUTOS_ATLASSIAN_EMAIL
+  token_env: AUTOS_ATLASSIAN_TOKEN
+bitbucket:
+  allowed_repositories:
+    - workspace: example
+      repository_slug: sample-app
+      remote_url: https://bitbucket.org/example/sample-app.git
+      protected_branches: [main, develop]
+      build_profile: java-example
+      allowed_paths: [src/**, pom.xml]
+      prohibited_paths: [src/main/resources/secrets/**]
+  push_feature_branch: false
+  create_pull_request: false
+git:
+  branch_template: deep/{issueKey}
+  no_rebase: true
+  no_force_push: true
+  refuse_existing_feature_branch: true
+providers:
+  claude: {binary: claude, auth_profile: claude-personal}
+  codex: {binary: codex, auth_profile: codex-personal}
+  cursor: {binary: cursor-agent, auth_profile: cursor-personal}
+agents:
+  # Each role tries `provider`, then `fallbacks` in order, only after AUTH, RATE_LIMIT, UPSTREAM, UNAVAILABLE,
+  # TIMEOUT, INVALID_OUTPUT or CONTEXT failures. A chain never repeats a provider. Cursor always uses model "auto".
+  swe: {provider: claude, timeout_ms: 600000, fallbacks: [{provider: codex}, {provider: cursor}]}
+  qa: {provider: codex, timeout_ms: 600000, fallbacks: [{provider: claude}, {provider: cursor}]}
+  reviewer: {provider: cursor, timeout_ms: 600000, fallbacks: [{provider: claude}, {provider: codex}]}
+jobs:
+  # Concurrent tickets (slots). Keep 1 for the pilot; on a larger host raise up to 8 (at most one active job per issue).
+  max_parallel: 1
+  # Concurrent build/test runs across all tickets; must be <= max_parallel. Builds are the heaviest step.
+  max_concurrent_checks: 1
+  max_repair_rounds: 2
+  # Disk hygiene: workspaces of BLOCKED/CANCELLED/superseded attempts are removed after this many hours.
+  # The latest READY_FOR_HUMAN workspace stays until you run `autos close <KEY> --merged|--abandoned`.
+  workspace_retention_hours: 72
+  auto_prune_workspaces: true
+  similar_tickets: {enabled: true, max_candidates: 5}
+build_profiles:
+  java-example:
+    jdk: '17'
+    checks:
+      - executable: mvn
+        args: [--batch-mode, test]
+        timeout_ms: 300000
+        required: true
+security:
+  allow_jira_write: false
+  allow_confluence_write: false
+  allow_merge: false
+  allow_deploy: false
+  allow_prod_db: false
+storage:
+  data_dir: data
+  artifacts_dir: artifacts
+  workspaces_dir: workspaces
+api:
+  listen_host: 127.0.0.1
+  port: 8787
+  operator_token_env: AUTOS_OPERATOR_TOKEN

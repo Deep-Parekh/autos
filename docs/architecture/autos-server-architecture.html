@@ -1,0 +1,292 @@
+<title>Autos Server Architecture</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: one reading column; the diagram breaks out wider and scrolls on its own when narrow. */
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --fg: #18202b; --muted: #5a6474; --line: #c9d0db;
+  --trusted: #0f766e; --trusted-soft: #e3f3f1;
+  --agent: #b45309; --agent-soft: #fbf0e1;
+  --external: #4f46a5; --external-soft: #ecebf8;
+  --store: #475569; --store-soft: #eef1f5;
+  --host: #e9edf3;
+  --display: "IBM Plex Sans Condensed", "IBM Plex Sans", "Arial Narrow", sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #11161d; --surface: #18202a; --fg: #e6ebf2; --muted: #9aa5b5; --line: #334051;
+  --trusted: #4fc2b4; --trusted-soft: #13322f; --agent: #f0a54a; --agent-soft: #3a2a14;
+  --external: #a7a0f0; --external-soft: #262447; --store: #a7b4c6; --store-soft: #1f2833; --host: #141b24; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #11161d; --surface: #18202a; --fg: #e6ebf2; --muted: #9aa5b5; --line: #334051;
+  --trusted: #4fc2b4; --trusted-soft: #13322f; --agent: #f0a54a; --agent-soft: #3a2a14;
+  --external: #a7a0f0; --external-soft: #262447; --store: #a7b4c6; --store-soft: #1f2833; --host: #141b24; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 400 16px/1.6 var(--body); }
+.page { max-width: 1180px; margin: 0 auto; padding-block: 40px 64px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: grid; gap: 40px; }
+.prose { max-width: 70ch; display: grid; gap: 12px; }
+h1 { font: 600 clamp(30px, 4.5vw, 44px)/1.1 var(--display); letter-spacing: -0.01em; margin: 0; text-wrap: balance; }
+h2 { font: 600 24px/1.2 var(--display); margin: 0; text-wrap: balance; }
+p { margin: 0; }
+.lede { color: var(--muted); font-size: 18px; }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+code, .mono { font-family: var(--mono); font-size: 0.88em; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px 20px; font-size: 14px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 8px; }
+.sw { width: 14px; height: 14px; border-radius: 3px; border: 1.5px solid; }
+.sw.t { background: var(--trusted-soft); border-color: var(--trusted); }
+.sw.a { background: var(--agent-soft); border-color: var(--agent); }
+.sw.e { background: var(--external-soft); border-color: var(--external); }
+.sw.s { background: var(--store-soft); border-color: var(--store); }
+.diagram { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.diagram svg { display: block; min-width: 980px; width: 100%; height: auto; }
+svg text { font-family: var(--body); fill: var(--fg); }
+svg .t-title { font: 600 15px var(--display); }
+svg .t-small { font-size: 12px; fill: var(--muted); }
+svg .t-mono { font: 11.5px var(--mono); fill: var(--muted); }
+svg .t-edge { font: 500 11.5px var(--mono); fill: var(--fg); }
+svg .host { fill: var(--host); stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 6 5; }
+svg .trusted { fill: var(--trusted-soft); stroke: var(--trusted); stroke-width: 1.5; }
+svg .agent { fill: var(--agent-soft); stroke: var(--agent); stroke-width: 1.5; }
+svg .agent-group { fill: none; stroke: var(--agent); stroke-width: 1.2; stroke-dasharray: 4 4; }
+svg .external { fill: var(--external-soft); stroke: var(--external); stroke-width: 1.5; }
+svg .store { fill: var(--store-soft); stroke: var(--store); stroke-width: 1.5; }
+svg .edge { stroke: var(--muted); stroke-width: 1.6; fill: none; }
+svg .edge.read { stroke: var(--external); }
+svg .edge.trusted { stroke: var(--trusted); }
+svg .edge.agent { stroke: var(--agent); }
+svg .edge.dash { stroke-dasharray: 5 4; }
+svg .arrow { fill: var(--muted); }
+svg .arrow.read { fill: var(--external); }
+svg .arrow.trusted { fill: var(--trusted); }
+svg .arrow.agent { fill: var(--agent); }
+svg .labelbg { fill: var(--surface); }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 32px; align-items: start; }
+.cols > * { min-width: 0; }
+ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 10px; }
+ol.steps li { counter-increment: s; display: grid; grid-template-columns: 30px 1fr; gap: 10px; align-items: baseline; }
+ol.steps li::before { content: counter(s); font: 500 13px/1 var(--mono); color: var(--trusted); border: 1.5px solid var(--trusted); border-radius: 50%; width: 24px; height: 24px; display: grid; place-items: center; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px/1.3 var(--mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+td.who { font-weight: 600; white-space: nowrap; }
+.pill { display: inline-block; font: 500 11px/1.6 var(--mono); padding: 0 7px; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+.pill.t { color: var(--trusted); border-color: var(--trusted); }
+.pill.a { color: var(--agent); border-color: var(--agent); }
+.facts { display: grid; gap: 14px; }
+.fact { display: grid; gap: 4px; padding-left: 14px; border-left: 2px solid var(--line); }
+.fact b { font-weight: 600; }
+.note { font-size: 14px; color: var(--muted); }
+a { color: var(--trusted); }
+</style>
+
+<main class="page">
+  <header class="prose">
+    <div class="eyebrow">Autos · server deployment</div>
+    <h1>Autos Server Architecture</h1>
+    <p class="lede">How Autos turns Jira bugs into reviewed feature branches on one Ubuntu host: two long-running trusted processes, and short-lived agent containers that exist only while a ticket is being worked.</p>
+    <div class="legend" aria-label="Legend">
+      <span><i class="sw t"></i>Trusted Autos code</span>
+      <span><i class="sw a"></i>Untrusted coding agents (sandboxed)</span>
+      <span><i class="sw e"></i>External services</span>
+      <span><i class="sw s"></i>Persistent storage</span>
+    </div>
+  </header>
+
+  <section class="diagram" aria-label="Architecture diagram">
+    <svg viewBox="0 0 1120 800" role="img" aria-labelledby="dg-title dg-desc">
+      <title id="dg-title">Autos server architecture</title>
+      <desc id="dg-desc">The controller container polls Jira and Confluence read-only, runs trusted Git against Bitbucket, and asks the supervisor over a Unix socket to start per-ticket agent and check containers. Agent containers reach only provider APIs. The operator connects over SSH.</desc>
+      <defs>
+        <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrow" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="mr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrow read" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="mt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrow trusted" d="M0,0 L10,5 L0,10 z"/></marker>
+        <marker id="ma" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrow agent" d="M0,0 L10,5 L0,10 z"/></marker>
+      </defs>
+
+      <!-- External services -->
+      <rect class="external" x="40" y="24" width="150" height="62" rx="8"/>
+      <text class="t-title" x="58" y="50">Jira Cloud</text>
+      <text class="t-small" x="58" y="70">private saved filter</text>
+      <rect class="external" x="210" y="24" width="150" height="62" rx="8"/>
+      <text class="t-title" x="228" y="50">Confluence</text>
+      <text class="t-small" x="228" y="70">project → branch map</text>
+      <rect class="external" x="380" y="24" width="170" height="62" rx="8"/>
+      <text class="t-title" x="398" y="50">Bitbucket</text>
+      <text class="t-small" x="398" y="70">dev branch · deep/&lt;KEY&gt;</text>
+      <rect class="external" x="770" y="24" width="300" height="62" rx="8"/>
+      <text class="t-title" x="788" y="50">LLM provider APIs</text>
+      <text class="t-small" x="788" y="70">Claude · Codex · Cursor (auto), with fallbacks</text>
+
+      <!-- Host -->
+      <rect class="host" x="20" y="130" width="1080" height="590" rx="14"/>
+      <text class="t-mono" x="40" y="154">UBUNTU HOST · /opt/autos</text>
+
+      <!-- Controller -->
+      <rect class="trusted" x="40" y="172" width="380" height="330" rx="10"/>
+      <text class="t-title" x="60" y="200">Controller</text>
+      <text class="t-mono" x="60" y="218">docker compose · restart: unless-stopped</text>
+      <g class="t-small">
+        <text x="60" y="250">• Poll loop: reads the filter every 5 min</text>
+        <text x="60" y="274">• Queue + job slots (SQLite leases)</text>
+        <text x="60" y="298">• Workflow: route → SWE → checks → QA →</text>
+        <text x="72" y="316">review → repair (≤2) → commit</text>
+        <text x="60" y="340">• Trusted Git: fetch, pin base, commit,</text>
+        <text x="72" y="358">optional fast-forward push</text>
+        <text x="60" y="382">• Provider fallback chains + handoff</text>
+        <text x="60" y="406">• AGENTS.md read from the commit</text>
+        <text x="60" y="430">• HTTP API + SSE events</text>
+      </g>
+      <rect class="labelbg" x="60" y="446" width="340" height="40" rx="6" stroke="var(--line)"/>
+      <text class="t-mono" x="74" y="464">127.0.0.1:8787 · bearer token</text>
+      <text class="t-mono" x="74" y="480">secrets: Atlassian, operator, Git token</text>
+
+      <!-- Supervisor -->
+      <rect class="trusted" x="470" y="230" width="230" height="150" rx="10"/>
+      <text class="t-title" x="490" y="258">Runner supervisor</text>
+      <text class="t-mono" x="490" y="276">systemd · autos user</text>
+      <g class="t-small">
+        <text x="490" y="304">• Only process with Docker</text>
+        <text x="490" y="326">• Fixed actions: run role,</text>
+        <text x="502" y="344">run checks, stop job</text>
+        <text x="490" y="366">• Holds provider API keys</text>
+      </g>
+
+      <!-- Per-ticket containers -->
+      <rect class="agent-group" x="750" y="150" width="330" height="352" rx="12"/>
+      <text class="t-mono" x="768" y="174">PER TICKET · docker run --rm</text>
+      <rect class="agent" x="768" y="188" width="294" height="62" rx="8"/>
+      <text class="t-title" x="784" y="212">SWE agent</text>
+      <text class="t-small" x="784" y="234">source read-write · .git read-only</text>
+      <rect class="agent" x="768" y="262" width="294" height="62" rx="8"/>
+      <text class="t-title" x="784" y="286">QA agent</text>
+      <text class="t-small" x="784" y="308">fresh session · source read-only</text>
+      <rect class="agent" x="768" y="336" width="294" height="62" rx="8"/>
+      <text class="t-title" x="784" y="360">Reviewer agent</text>
+      <text class="t-small" x="784" y="382">fresh session · source read-only</text>
+      <rect class="trusted" x="768" y="420" width="294" height="66" rx="8"/>
+      <text class="t-title" x="784" y="444">Checks (build + tests)</text>
+      <text class="t-small" x="784" y="466">no network · copy of source · Maven cache</text>
+
+      <!-- Storage -->
+      <rect class="store" x="40" y="560" width="1040" height="140" rx="10"/>
+      <text class="t-title" x="60" y="588">Persistent storage</text>
+      <g>
+        <rect class="labelbg" x="60" y="604" width="190" height="80" rx="6" stroke="var(--line)"/>
+        <text class="t-mono" x="74" y="626">data/</text>
+        <text class="t-small" x="74" y="648">SQLite jobs + events</text>
+        <text class="t-small" x="74" y="668">runner.sock (0600)</text>
+        <rect class="labelbg" x="266" y="604" width="190" height="80" rx="6" stroke="var(--line)"/>
+        <text class="t-mono" x="280" y="626">artifacts/&lt;job&gt;/</text>
+        <text class="t-small" x="280" y="648">evidence, summary,</text>
+        <text class="t-small" x="280" y="668">private transcripts</text>
+        <rect class="labelbg" x="472" y="604" width="190" height="80" rx="6" stroke="var(--line)"/>
+        <text class="t-mono" x="486" y="626">workspaces/&lt;job&gt;/</text>
+        <text class="t-small" x="486" y="648">isolated clone on</text>
+        <text class="t-small" x="486" y="668">deep/&lt;KEY&gt;</text>
+        <rect class="labelbg" x="678" y="604" width="180" height="80" rx="6" stroke="var(--line)"/>
+        <text class="t-mono" x="692" y="626">/var/lib/autos/m2</text>
+        <text class="t-small" x="692" y="648">offline Maven cache</text>
+        <text class="t-small" x="692" y="668">(read-only to checks)</text>
+        <rect class="labelbg" x="874" y="604" width="190" height="80" rx="6" stroke="var(--line)"/>
+        <text class="t-mono" x="888" y="626">/etc/autos/</text>
+        <text class="t-small" x="888" y="648">provider keys, Git token,</text>
+        <text class="t-small" x="888" y="668">supervisor env (0600)</text>
+      </g>
+
+      <!-- Operator -->
+      <rect class="external" x="40" y="740" width="420" height="48" rx="8"/>
+      <text class="t-title" x="58" y="769">Operator (you)</text>
+      <text class="t-mono" x="180" y="769">ssh · autos status / watch / revise</text>
+
+      <!-- Edges: controller to Jira / Confluence (read only) -->
+      <path class="edge read" d="M115 172 V92" marker-end="url(#mr)"/>
+      <path class="edge read" d="M285 172 V92" marker-end="url(#mr)"/>
+      <rect class="labelbg" x="116" y="112" width="160" height="20" rx="4"/>
+      <text class="t-edge" x="124" y="126">HTTPS GET only</text>
+      <!-- controller to Bitbucket -->
+      <path class="edge trusted" d="M410 172 V92" marker-end="url(#mt)" marker-start="url(#mt)"/>
+      <rect class="labelbg" x="420" y="104" width="250" height="20" rx="4"/>
+      <text class="t-edge" x="428" y="118">git fetch · optional feature push</text>
+      <!-- controller to supervisor -->
+      <path class="edge trusted" d="M420 305 H466" marker-end="url(#mt)"/>
+      <rect class="labelbg" x="424" y="392" width="270" height="36" rx="4"/>
+      <text class="t-edge" x="432" y="406">unix socket (data/runner.sock)</text>
+      <text class="t-edge" x="432" y="422">"run role" · "run checks" · "stop"</text>
+      <path class="edge trusted dash" d="M445 305 V390"/>
+      <!-- supervisor to containers -->
+      <path class="edge trusted" d="M700 305 H746" marker-end="url(#mt)"/>
+      <!-- agents to providers -->
+      <path class="edge agent" d="M920 150 V92" marker-end="url(#ma)"/>
+      <rect class="labelbg" x="928" y="104" width="160" height="34" rx="4"/>
+      <text class="t-edge" x="936" y="118">egress network</text>
+      <text class="t-edge" x="936" y="132">own provider key only</text>
+      <!-- workspaces mounted into containers -->
+      <path class="edge dash" d="M567 604 C 600 540, 720 540, 760 498" marker-end="url(#m)"/>
+      <rect class="labelbg" x="560" y="526" width="190" height="20" rx="4"/>
+      <text class="t-edge" x="568" y="540">workspace mounted per role</text>
+      <!-- controller to storage -->
+      <path class="edge trusted" d="M230 502 V600" marker-end="url(#mt)"/>
+      <!-- operator to controller -->
+      <path class="edge" d="M250 740 V712" marker-end="url(#m)"/>
+    </svg>
+  </section>
+
+  <section class="cols">
+    <div class="prose">
+      <div class="eyebrow">One ticket, start to finish</div>
+      <h2>What happens to a bug</h2>
+      <ol class="steps">
+        <li><span>The controller reads the saved Jira filter and queues each new eligible bug. Ineligible tickets are blocked with a reason, and the queue keeps going.</span></li>
+        <li><span>It looks up the project in the Confluence branch map, fetches the development branch, pins its exact commit, and creates an isolated workspace on <code>deep/&lt;KEY&gt;</code>.</span></li>
+        <li><span>It reads <code>AGENTS.md</code> and other instruction files from that commit. Every agent, whichever provider it uses, gets them as binding project rules.</span></li>
+        <li><span>The supervisor starts an SWE container. If a provider hits a limit, the next provider in the chain continues from a progress handoff.</span></li>
+        <li><span>Build and test checks run in a network-less container on a copy of the source.</span></li>
+        <li><span>Independent QA and reviewer agents, each in a fresh read-only session, judge the exact candidate. Findings go back to SWE for up to two repair rounds.</span></li>
+        <li><span>Trusted Git commits only the reviewed content, optionally pushes the feature branch, and writes the evidence. The job ends <b>READY_FOR_HUMAN</b> or <b>BLOCKED</b>.</span></li>
+        <li><span>You review the branch and evidence, then merge it yourself or run <code>autos revise</code> with notes.</span></li>
+      </ol>
+    </div>
+
+    <div class="prose">
+      <div class="eyebrow">Trust boundaries</div>
+      <h2>Who holds what</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Component</th><th>Can access</th><th>Never gets</th></tr></thead>
+          <tbody>
+            <tr><td class="who">Controller <span class="pill t">trusted</span></td><td>Jira/Confluence (read), Git token, SQLite, API</td><td>Docker, provider keys</td></tr>
+            <tr><td class="who">Supervisor <span class="pill t">trusted</span></td><td>Docker, provider keys</td><td>Jira, Git credentials</td></tr>
+            <tr><td class="who">SWE agent <span class="pill a">sandboxed</span></td><td>Its workspace (write), its own provider key</td><td>.git writes, instruction-file edits, Docker, API, other jobs</td></tr>
+            <tr><td class="who">QA / Reviewer <span class="pill a">sandboxed</span></td><td>Workspace (read-only), own provider key</td><td>Any write to source</td></tr>
+            <tr><td class="who">Checks <span class="pill t">trusted</span></td><td>Source copy, Maven cache (read-only)</td><td>Network, credentials</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">Every agent container runs non-root, with a read-only root filesystem, all capabilities dropped, memory, CPU and process limits, and a timeout.</p>
+    </div>
+  </section>
+
+  <section class="cols">
+    <div class="facts">
+      <div class="eyebrow">Always on vs. on demand</div>
+      <div class="fact"><b>Always running:</b> the controller (Compose) and the supervisor (systemd). Both restart on failure.</div>
+      <div class="fact"><b>Only while a ticket is worked:</b> the agent and check containers, which are removed after each step.</div>
+      <div class="fact"><b>Idle host:</b> no agent containers, only a poll every few minutes.</div>
+    </div>
+    <div class="facts">
+      <div class="eyebrow">Built-in guarantees</div>
+      <div class="fact"><b>Read-only Atlassian:</b> no Jira or Confluence writes, PRs, merges, rebases or deploys.</div>
+      <div class="fact"><b>No stale approvals:</b> READY_FOR_HUMAN needs passing checks, QA and review of the same final candidate.</div>
+      <div class="fact"><b>Scales by config:</b> one ticket at a time by default. On a larger host, <code>jobs.max_parallel</code> allows up to 8.</div>
+    </div>
+    <div class="facts">
+      <div class="eyebrow">Watching it</div>
+      <div class="fact"><code>autos status</code> shows slots, the active tickets, stage, agent and elapsed time.</div>
+      <div class="fact"><code>autos watch</code> streams every step live, including provider fallbacks.</div>
+      <div class="fact">Per-job evidence: <code>summary.md</code>, <code>rounds.json</code>, checks, QA and review.</div>
+    </div>
+  </section>
+</main>
