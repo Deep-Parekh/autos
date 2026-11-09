@@ -333,6 +333,13 @@ export function formatEvent(event: JobEvent): string {
     const after = [event.from_provider, event.code].filter(Boolean).join(' ');
     return [event.at.slice(11, 19), event.issue_key ?? 'service', `${role} fallback \u2192 ${event.provider ?? 'next provider'}${after ? ` after ${after}` : ''}`, ...(event.repair_round !== undefined ? [`(round ${event.repair_round})`] : [])].join(' ');
   }
+  if (event.type === 'job_paused') {
+    const role = event.role ? (event.role === 'swe' ? 'SWE' : event.role === 'qa' ? 'QA' : 'Reviewer') : 'Role';
+    return [event.at.slice(11, 19), event.issue_key ?? 'service', `paused: every ${role} provider limited${event.code ? ` (${event.code})` : ''}`, ...(event.resume_at ? [`resumes ${event.resume_at.slice(0, 16).replace('T', ' ')}Z`] : []), ...(event.count !== undefined ? [`pause ${event.count}`] : []), ...(event.repair_round !== undefined ? [`(round ${event.repair_round})`] : [])].join(' ');
+  }
+  if (event.type === 'job_resumed') {
+    return [event.at.slice(11, 19), event.issue_key ?? 'service', `resumed${event.role ? ` ${event.role}` : ''} at its primary provider`, ...(event.code ? [`after ${event.code}`] : []), ...(event.repair_round !== undefined ? [`(round ${event.repair_round})`] : [])].join(' ');
+  }
   if (event.type === 'issue_closed') {
     return [event.at.slice(11, 19), event.issue_key ?? 'service', `issue closed${event.outcome ? ` as ${event.outcome.toLowerCase()}` : ''}`, ...(event.count !== undefined ? [`workspaces removed=${event.count}`] : []), ...(event.code ? [`code=${event.code}`] : [])].join(' ');
   }
@@ -379,6 +386,10 @@ export function formatStatus(status: StatusResponse, now = Date.now()): string {
       lines.push(`Active: ${active.issue_key} ${active.state}${active.stage ? ` stage=${active.stage}` : ''}${who} round ${active.repair_round}${active.dry_run ? ' (dry run)' : ''}${elapsed ? `  elapsed ${elapsed}` : ''}`);
     }
   } else lines.push('Active: idle (no job running)');
+  for (const paused of activity.paused_jobs ?? []) {
+    const due = paused.resume_at ? Date.parse(paused.resume_at) : NaN;
+    lines.push(`Paused: ${paused.issue_key}${paused.role ? ` ${paused.role}` : ''}${paused.code ? ` ${paused.code}` : ''} round ${paused.repair_round} pause ${paused.pause_count}  resumes ${paused.resume_at ?? 'unknown'}${Number.isFinite(due) ? ` (in ${formatDuration((due - now) / 1000)})` : ''}  (no slot held)`);
+  }
   const poll = activity.polling;
   lines.push(`Polling: ${poll.in_progress ? 'in progress' : poll.last_outcome ? `last ${poll.last_outcome}${poll.last_error_code ? ` (${poll.last_error_code})` : ''} at ${poll.last_finished_at ?? poll.last_started_at ?? 'unknown'}` : 'no poll yet'}${poll.last_discovered !== null ? `, discovered ${poll.last_discovered}` : ''}`);
   const counts = Object.entries(activity.counts).filter(([, count]) => (count ?? 0) > 0).map(([state, count]) => `${state} ${count}`);
@@ -635,11 +646,12 @@ export function formatPrune(result: PruneWorkspacesResult): string {
     `${result.dry_run ? 'Would remain' : 'Remaining'}: ${result.remaining} workspace director${result.remaining === 1 ? 'y' : 'ies'}${result.freed_bytes !== null ? `; ${result.dry_run ? 'would free' : 'freed'} ${formatBytes(result.freed_bytes)}` : ''}`,
   ].join('\n');
 }
-export function formatIssue(detail: { issue_key: string; closure: IssueClosure | null; ticket_notes?: TicketNotesSummary | undefined; jobs: Array<Pick<JobRecord, 'job_id' | 'state' | 'dry_run' | 'updated_at'> & { revision?: number | undefined; closed_as?: string | undefined; feature_branch?: string | undefined; commit_sha?: string | undefined }> }): string {
+export function formatIssue(detail: { issue_key: string; closure: IssueClosure | null; ticket_notes?: TicketNotesSummary | undefined; jobs: Array<Pick<JobRecord, 'job_id' | 'state' | 'dry_run' | 'updated_at'> & { revision?: number | undefined; closed_as?: string | undefined; feature_branch?: string | undefined; commit_sha?: string | undefined; resume_at?: string | undefined; pause_code?: string | undefined; paused_role?: string | undefined }> }): string {
   const lines = detail.closure ? formatClosure(detail.closure) : [`${detail.issue_key} is open (not closed)`];
   const ticket = detail.ticket_notes && (detail.ticket_notes.notes.length > 0 || detail.ticket_notes.held) ? ['', ...formatTicketDetail(detail.ticket_notes, 'Ticket notes')] : [];
   if (detail.jobs.length === 0) return [...lines, 'No attempts.', ...ticket].join('\n');
-  return [...lines, '', ...table(['JOB', 'STATE', 'REV', 'DRY', 'BRANCH', 'COMMIT', 'UPDATED'], detail.jobs.map((job) => [job.job_id, stateLabel(job.state, job.closed_as), String(job.revision ?? 0), job.dry_run ? 'yes' : 'no', job.feature_branch ?? '-', job.commit_sha?.slice(0, 12) ?? '-', job.updated_at])), ...ticket].join('\n');
+  const paused = detail.jobs.filter((job) => job.state === 'PAUSED').map((job) => `Paused ${job.job_id}: every ${job.paused_role ?? 'role'} provider limited (${job.pause_code ?? 'RATE_LIMIT'}); resumes at ${job.resume_at ?? 'unknown'} with the same workspace and base (cancel with autos jobs cancel)`);
+  return [...lines, '', ...table(['JOB', 'STATE', 'REV', 'DRY', 'BRANCH', 'COMMIT', 'UPDATED'], detail.jobs.map((job) => [job.job_id, stateLabel(job.state, job.closed_as), String(job.revision ?? 0), job.dry_run ? 'yes' : 'no', job.feature_branch ?? '-', job.commit_sha?.slice(0, 12) ?? '-', job.updated_at])), ...paused, ...ticket].join('\n');
 }
 
 function parseFlags(args: string[], spec: { bool: readonly string[]; value: readonly string[] }, usage: string): { flags: Set<string>; values: Map<string, string> } {

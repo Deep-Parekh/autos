@@ -107,6 +107,7 @@ export async function createSyntheticScenario(options: SyntheticScenarioOptions 
     prepare: async (request: GitPrepareRequest, signal?: AbortSignal) => { const workspace = await actualGit.prepare(request, signal); workspaces.set(workspace.job_id, workspace); return workspace; },
     inspectCandidate: actualGit.inspectCandidate.bind(actualGit), commit: actualGit.commit.bind(actualGit), push: actualGit.push.bind(actualGit),
     readInstructionFiles: actualGit.readInstructionFiles.bind(actualGit), takeHandoff: actualGit.takeHandoff.bind(actualGit),
+    sealWorkspace: actualGit.sealWorkspace.bind(actualGit), reopen: actualGit.reopen.bind(actualGit),
   };
 
   const providerHome = join(root, 'provider-home');

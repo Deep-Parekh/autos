@@ -160,7 +160,7 @@ const jobSchema = {
   properties: {
     job_id: { type: 'string', format: 'uuid' }, issue_key: { type: 'string', pattern: '^[A-Z][A-Z0-9]*-[1-9][0-9]*$' },
     repository_id: { type: ['string', 'null'] }, base_sha: { type: ['string', 'null'] }, base_branch: { type: 'string' },
-    state: { type: 'string', enum: ['QUEUED', 'INVESTIGATING', 'PLANNED', 'IMPLEMENTING', 'QA', 'REVIEW', 'REVISING', 'READY_FOR_HUMAN', 'BLOCKED', 'CANCELLING', 'CANCELLED'] },
+    state: { type: 'string', enum: [...JOB_STATES] },
     dry_run: { type: 'boolean' }, repair_round: { type: 'integer', minimum: 0, maximum: 2 },
     created_at: { type: 'string', format: 'date-time' }, updated_at: { type: 'string', format: 'date-time' },
     blocked_code: { type: 'string', enum: [...ERROR_CODES] }, blocked_reason: { type: 'string' }, feature_branch: { type: 'string' }, commit_sha: { type: 'string' },
@@ -168,6 +168,11 @@ const jobSchema = {
     parent_job_id: { type: 'string', format: 'uuid', description: 'Set on revision jobs: the READY_FOR_HUMAN job whose commit this attempt continues.' },
     revision: { type: 'integer', minimum: 0, maximum: 20, description: '0 for an initial attempt, n for the n-th requested revision of the same issue.' },
     closed_as: { type: 'string', enum: [...ISSUE_RESOLUTIONS], description: 'Set on every attempt of an issue the operator closed (MERGED or ABANDONED).' },
+    resume_at: { type: 'string', format: 'date-time', description: 'PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff).' },
+    pause_code: { type: 'string', enum: [...ERROR_CODES], description: 'PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran.' },
+    paused_role: { type: 'string', enum: [...ROLES], description: 'PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider.' },
+    paused_since: { type: 'string', format: 'date-time', description: 'PAUSED only: start of the pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours.' },
+    pause_count: { type: 'integer', minimum: 1, maximum: 1000, description: 'PAUSED only: pauses in the current streak.' },
   }, required: ['job_id', 'issue_key', 'repository_id', 'base_sha', 'state', 'dry_run', 'repair_round', 'created_at', 'updated_at'],
 } as const;
 /** Operator note request body (instructions are never echoed back or logged). */
@@ -194,6 +199,7 @@ const eventSchema = {
     role: { type: 'string', enum: [...roleEnum] }, provider: { type: 'string', enum: [...providerEnum] }, from_provider: { type: 'string', enum: [...providerEnum], description: 'provider_fallback only: the provider that failed (provider is the one now used).' },
     repair_round: { type: 'integer', minimum: 0, maximum: 2 }, outcome: { type: 'string' }, code: { type: 'string', enum: [...ERROR_CODES] },
     elapsed_ms: { type: 'integer', minimum: 0 }, count: { type: 'integer', minimum: 0 }, message: { type: 'string', maxLength: 300 },
+    resume_at: { type: 'string', format: 'date-time', description: 'job_paused only: when the attempt is due to resume.' },
   }, required: ['event_id', 'at', 'type', 'job_id', 'issue_key'],
 } as const;
 const issueKeyParams = { type: 'object', properties: { issueKey: { type: 'string', pattern: '^[A-Z][A-Z0-9]*-[1-9][0-9]*$' } }, required: ['issueKey'] } as const;
@@ -314,11 +320,20 @@ const activeJobWithElapsedSchema = {
   ...activeJobSchemaJson,
   properties: { ...activeJobSchemaJson.properties, active_elapsed_s: { type: 'integer', minimum: 0 }, stage_elapsed_s: { type: 'integer', minimum: 0 } },
 } as const;
+const pausedJobSchemaJson = {
+  type: 'object', additionalProperties: false, description: 'A PAUSED attempt (holds no slot) waiting for provider limits to reset.',
+  properties: {
+    job_id: { type: 'string', format: 'uuid' }, issue_key: { type: 'string' }, repair_round: { type: 'integer', minimum: 0, maximum: 2 },
+    role: { type: ['string', 'null'], enum: [...roleEnum, null] }, code: { type: ['string', 'null'], enum: [...ERROR_CODES, null] },
+    resume_at: nullableString, paused_since: nullableString, pause_count: { type: 'integer', minimum: 0 },
+  }, required: ['job_id', 'issue_key', 'repair_round', 'role', 'code', 'resume_at', 'paused_since', 'pause_count'],
+} as const;
 const activitySchema = {
   type: 'object', additionalProperties: false,
   properties: {
     active: { ...activeJobSchemaJson, type: ['object', 'null'] },
     active_jobs: { type: 'array', items: activeJobSchemaJson },
+    paused_jobs: { type: 'array', items: pausedJobSchemaJson },
     slots: { type: 'object', additionalProperties: false, properties: {
       max_parallel: { type: 'integer', minimum: 1 }, in_use: { type: 'integer', minimum: 0 }, max_concurrent_checks: { type: 'integer', minimum: 1 }, checks_in_use: { type: 'integer', minimum: 0 },
     }, required: ['max_parallel', 'in_use', 'max_concurrent_checks', 'checks_in_use'] },
@@ -328,7 +343,7 @@ const activitySchema = {
     }, required: ['in_progress', 'last_started_at', 'last_finished_at', 'last_outcome', 'last_error_code', 'last_discovered'] },
     counts: { type: 'object', additionalProperties: { type: 'integer', minimum: 0 } },
     last_event_id: { type: 'integer', minimum: 0 },
-  }, required: ['active', 'active_jobs', 'slots', 'polling', 'counts', 'last_event_id'],
+  }, required: ['active', 'active_jobs', 'paused_jobs', 'slots', 'polling', 'counts', 'last_event_id'],
 } as const;
 const statusResponseSchema = {
   type: 'object', additionalProperties: false,
@@ -343,7 +358,7 @@ const statusResponseSchema = {
     stage_elapsed_s: { type: 'integer', minimum: 0 },
     active_jobs: { type: 'array', items: activeJobWithElapsedSchema },
   }, required: ['controller', 'runner', 'activity', 'active_jobs'],
-  examples: [{ controller: { version: '0.1.0', started_at: '2026-11-07T12:00:00.000Z', uptime_s: 60, poll_interval_s: 60, poll_loop: { running: true, next_poll_at: '2026-11-07T12:01:00.000Z', consecutive_failures: 0, auto_poll: true, last_discovery_at: '2026-11-07T12:00:00.000Z' } }, runner: { status: 'unknown' }, activity: { active: null, active_jobs: [], slots: { max_parallel: 1, in_use: 0, max_concurrent_checks: 1, checks_in_use: 0 }, polling: { in_progress: false, last_started_at: null, last_finished_at: null, last_outcome: null, last_error_code: null, last_discovered: null }, counts: {}, last_event_id: 0 }, active_jobs: [] }],
+  examples: [{ controller: { version: '0.1.0', started_at: '2026-11-07T12:00:00.000Z', uptime_s: 60, poll_interval_s: 60, poll_loop: { running: true, next_poll_at: '2026-11-07T12:01:00.000Z', consecutive_failures: 0, auto_poll: true, last_discovery_at: '2026-11-07T12:00:00.000Z' } }, runner: { status: 'unknown' }, activity: { active: null, active_jobs: [], paused_jobs: [], slots: { max_parallel: 1, in_use: 0, max_concurrent_checks: 1, checks_in_use: 0 }, polling: { in_progress: false, last_started_at: null, last_finished_at: null, last_outcome: null, last_error_code: null, last_discovered: null }, counts: {}, last_event_id: 0 }, active_jobs: [] }],
 } as const;
 const retryBlockedSchema = {
   type: 'object', additionalProperties: false,
@@ -390,6 +405,13 @@ export function safeJob(job: JobRecord): JobRecord {
   if (job.feature_branch) clean.feature_branch = job.feature_branch;
   if (job.commit_sha) clean.commit_sha = job.commit_sha;
   if (job.closed_as) clean.closed_as = job.closed_as;
+  if (job.state === 'PAUSED') {
+    if (job.resume_at) clean.resume_at = job.resume_at;
+    if (job.pause_code) clean.pause_code = job.pause_code;
+    if (job.paused_role) clean.paused_role = job.paused_role;
+    if (job.paused_since) clean.paused_since = job.paused_since;
+    if (job.pause_count) clean.pause_count = job.pause_count;
+  }
   // Read through a widened view until JobRecord (ports.ts) declares the revision fields.
   const revisionFields = job as JobRecord & { parent_job_id?: string; revision?: number };
   const extras = clean as JobRecord & { parent_job_id?: string; revision?: number };

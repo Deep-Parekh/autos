@@ -23,6 +23,16 @@ export const jobRecordSchema = z.strictObject({
   revision: z.number().int().min(0).max(20).optional(),
   /** Issue-level: set on every attempt of an issue the operator closed (`autos close`). Closed issues accept no new attempts. */
   closed_as: z.enum(['MERGED', 'ABANDONED']).optional(),
+  /** PAUSED only: when the attempt becomes due to resume (provider limit reset or backoff). */
+  resume_at: timestampSchema.optional(),
+  /** PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code (e.g. UPSTREAM) when a resuming attempt failed before any agent ran. */
+  pause_code: z.enum(ERROR_CODES).optional(),
+  /** PAUSED only: the role whose whole provider chain was limited; it reruns from its primary provider on resume. */
+  paused_role: roleSchema.optional(),
+  /** PAUSED only: start of the current pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours from here. */
+  paused_since: timestampSchema.optional(),
+  /** PAUSED only: pauses in the current streak (1 = first pause); drives the backoff when no reset time is known. */
+  pause_count: z.number().int().min(1).max(1000).optional(),
 });
 
 /**
@@ -34,7 +44,7 @@ export const JOB_EVENT_TYPES = [
   'role_started', 'role_finished', 'checks_started', 'checks_finished',
   'repair_round_started', 'commit_created', 'push_finished', 'job_finished',
   'poll_started', 'poll_finished', 'poll_failed', 'recovered', 'revision_requested', 'provider_fallback',
-  'issue_closed', 'workspaces_pruned',
+  'issue_closed', 'workspaces_pruned', 'job_paused', 'job_resumed',
 ] as const;
 export const jobEventTypeSchema = z.enum(JOB_EVENT_TYPES);
 export const WORKFLOW_STAGES = ['intake', 'routing', 'baseline', 'implementation', 'checks', 'qa', 'review', 'repair', 'finalize', 'push'] as const;
@@ -63,6 +73,8 @@ export const jobEventSchema = z.strictObject({
   count: z.number().int().min(0).optional(),
   /** Human-readable, sanitized, at most 300 characters. */
   message: z.string().max(300).optional(),
+  /** job_paused only: when the attempt is due to resume. */
+  resume_at: timestampSchema.optional(),
 });
 export type JobEvent = z.infer<typeof jobEventSchema>;
 export type JobEventType = z.infer<typeof jobEventTypeSchema>;
@@ -78,11 +90,21 @@ export const activeJobSchema = z.strictObject({
   });
 export type ActiveJob = z.infer<typeof activeJobSchema>;
 
+/** A PAUSED attempt: holds no slot; resumes at resume_at (see jobs.rate_limit_pause). */
+export const pausedJobSchema = z.strictObject({
+  job_id: jobIdSchema, issue_key: issueKeySchema, repair_round: z.number().int().min(0).max(2),
+  role: roleSchema.nullable(), code: z.enum(ERROR_CODES).nullable(),
+  resume_at: timestampSchema.nullable(), paused_since: timestampSchema.nullable(), pause_count: z.number().int().min(0),
+});
+export type PausedJob = z.infer<typeof pausedJobSchema>;
+
 export const workflowActivitySchema = z.strictObject({
   /** First active job (kept for compatibility when max_parallel is 1); see active_jobs. */
   active: activeJobSchema.nullable(),
   /** All jobs currently holding a slot, oldest first (length <= jobs.max_parallel). */
   active_jobs: z.array(activeJobSchema),
+  /** PAUSED attempts (no slot), earliest resume first. */
+  paused_jobs: z.array(pausedJobSchema),
   /** Configured slot limits. */
   slots: z.strictObject({ max_parallel: z.number().int().min(1), in_use: z.number().int().min(0), max_concurrent_checks: z.number().int().min(1), checks_in_use: z.number().int().min(0) }),
   polling: z.strictObject({
@@ -135,6 +157,13 @@ export const FALLBACK_ERROR_CODES = ['AUTH', 'RATE_LIMIT', 'UPSTREAM', 'UNAVAILA
  * gated by checks, QA and review.
  */
 export const HANDOFF_ERROR_CODES = ['RATE_LIMIT', 'CONTEXT', 'TIMEOUT', 'UPSTREAM'] as const;
+/**
+ * Provider-capacity failures. When every provider of a role's chain fails with one of these (at least one RATE_LIMIT
+ * and the rest RATE_LIMIT or UPSTREAM), the attempt is PAUSED instead of BLOCKED and resumes later in the same
+ * workspace. UPSTREAM alone (vendor outage without any limit signal) still blocks: it is not capacity and resuming
+ * blindly could loop. UNAVAILABLE (missing CLI or broken runner image), AUTH, TIMEOUT and CONTEXT never pause.
+ */
+export const PAUSE_ERROR_CODES = ['RATE_LIMIT', 'UPSTREAM'] as const;
 
 /** One provider attempt for a role invocation, recorded in evidence (rounds.json) — no transcript content. */
 export const providerAttemptSchema = z.strictObject({
@@ -154,6 +183,39 @@ export const providerAttemptSchema = z.strictObject({
   handoff_captured: z.boolean().optional(),
 });
 export type ProviderAttempt = z.infer<typeof providerAttemptSchema>;
+
+/**
+ * Internal resume point of a PAUSED attempt (stored by the workflow in its private SQLite database; never returned by
+ * the API or put in events). Prompts and the predecessor checklist are private evidence like the per-invocation
+ * prompt files. Validated again when read back.
+ */
+export const PAUSE_PHASES = ['implementation', 'policy_repair', 'repair', 'qa', 'review'] as const;
+export const pauseCheckpointSchema = z.strictObject({
+  schema_version: z.literal(1),
+  phase: z.enum(PAUSE_PHASES),
+  role: roleSchema,
+  /** Last provider of the limited chain (named in the resumed SWE's handoff). */
+  provider: providerSchema,
+  code: z.enum(ERROR_CODES),
+  repair_round: z.number().int().min(0).max(2),
+  /** Issue content hash at the attempt's intake; a resumed attempt blocks when the ticket changed meanwhile. */
+  intake_hash: z.string().regex(/^[a-f0-9]{64}$/),
+  /** Trusted-Git seal of the workspace at pause time (GitRunnerPort.sealWorkspace); null when the runner has none. */
+  workspace_seal: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  /** SWE phases: the exact role prompt the chain was running (the resumed SWE gets it again plus a handoff). */
+  swe_prompt: z.string().max(1_100_000).nullable(),
+  /** SWE phases: digest the interrupted SWE started from, and its latest progress checklist (agent-written, untrusted). */
+  swe_start_digest: z.string().max(128).nullable(),
+  checklist: z.string().max(64 * 1024).nullable(),
+  /** SWE phases: what the interrupted SWE did last (trusted transcript summary of agent-produced targets). */
+  recent_actions: z.array(z.strictObject({ tool: z.string().max(64), target: z.string().max(400) })).max(50),
+  /** rounds.json content so far and the provider attempts of the round in progress. */
+  rounds: z.array(z.record(z.string(), z.unknown())).max(20),
+  swe_attempts: z.array(providerAttemptSchema).max(200),
+  /** Repair SWE phases: the evidence the repair prompt was built from (for de-duplicated handoff context). */
+  repair_evidence: z.strictObject({ checks: z.unknown(), qa: z.unknown(), review: z.unknown() }).nullable(),
+});
+export type PauseCheckpoint = z.infer<typeof pauseCheckpointSchema>;
 
 /**
  * Issue closure (operator, after manual review). MERGED: the operator merged the latest READY_FOR_HUMAN commit.

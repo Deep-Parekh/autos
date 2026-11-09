@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { isAbsolute } from 'node:path';
 import { ERROR_CODES } from './errors.js';
 import { toolchainSelectionSchema } from './toolchain.js';
-import { identifierSchema, issueKeySchema, jobIdSchema, modelSchema, providerSchema, roleSchema } from './domain.js';
+import { identifierSchema, issueKeySchema, jobIdSchema, modelSchema, providerSchema, roleSchema, timestampSchema } from './domain.js';
 
 const localPath = z.string().min(1).refine((path) => isAbsolute(path) && !/[\x00\r\n]/.test(path), 'Expected an absolute local path');
 export const providerRequestSchema = z.strictObject({
@@ -16,10 +16,16 @@ export const providerResultSchema = z.strictObject({
   provider: providerSchema, role: roleSchema, status: z.enum(['SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT']),
   exit_code: z.number().int().nullable(), elapsed_ms: z.number().nonnegative(), transcript_path: localPath,
   result: z.unknown(), error_code: z.enum(ERROR_CODES).optional(), model: z.string().optional(),
+  /**
+   * RATE_LIMIT only: when the provider's own structured output says the limit resets (ISO time). Extracted by trusted
+   * adapter code from structured fields only (never assistant narrative); absent when unknown.
+   */
+  retry_at: timestampSchema.optional(),
 }).superRefine((result, ctx) => {
   if (result.status === 'SUCCEEDED' && (result.exit_code !== 0 || result.error_code)) ctx.addIssue({ code: 'custom', message: 'Successful provider invocation requires zero exit and no error' });
   if (result.status === 'TIMED_OUT' && result.error_code !== 'TIMEOUT') ctx.addIssue({ code: 'custom', message: 'Timeout requires TIMEOUT error' });
   if (result.status === 'CANCELLED' && result.error_code !== 'CANCELLED') ctx.addIssue({ code: 'custom', message: 'Cancellation requires CANCELLED error' });
+  if (result.retry_at !== undefined && result.error_code !== 'RATE_LIMIT') ctx.addIssue({ code: 'custom', message: 'retry_at is only valid with RATE_LIMIT' });
 });
 
 /**

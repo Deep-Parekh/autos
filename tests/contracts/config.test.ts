@@ -81,3 +81,13 @@ test('role fallback chains are ordered, distinct, and Cursor is auto-only', () =
     assert.throws(() => parseConfig(bad), (error: unknown) => error instanceof AutosError && error.code === 'INVALID_CONFIG');
   }
 });
+
+test('jobs.rate_limit_pause defaults and bounds', () => {
+  const base = parseConfigYaml(text) as any;
+  const withoutPause = structuredClone(base); delete withoutPause.jobs.rate_limit_pause;
+  assert.deepEqual(parseConfig(withoutPause).jobs.rate_limit_pause, { initial_minutes: 15, max_minutes: 240, max_total_hours: 24 });
+  for (const pause of [{ initial_minutes: 60, max_minutes: 30, max_total_hours: 24 }, { initial_minutes: 0, max_minutes: 30, max_total_hours: 24 }, { initial_minutes: 15, max_minutes: 240, max_total_hours: 0 }, { initial_minutes: 15, max_minutes: 240, max_total_hours: 24, extra: 1 }]) {
+    const bad = structuredClone(base); bad.jobs.rate_limit_pause = pause;
+    assert.throws(() => parseConfig(bad), (error: unknown) => error instanceof AutosError && error.code === 'INVALID_CONFIG');
+  }
+});
