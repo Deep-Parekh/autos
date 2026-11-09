@@ -60,6 +60,10 @@ Each profile entry has a `mode`. With `mode: "subscription"` Autos uses only the
 
 The supervisor passes each provider only its own credential, through a short-lived env file; credentials never appear in `docker` arguments, the controller, or the workspace. `autos doctor --deep` lists each profile's mode.
 
+### Codex command sandbox
+
+Inside the worker container Codex runs with `--sandbox danger-full-access` and approvals set to `never`. Its own sandbox (bubblewrap) needs Linux user namespaces, which Docker's default seccomp profile blocks, so with it every Codex shell command failed (`TOOL`). The container is the boundary instead. It has a read-only root filesystem, drops all capabilities, forbids privilege escalation and runs as a non-root user. Source is mounted read-only for QA, the reviewer and triage, and the container gets no host paths, no credentials other than its own login, and no Docker socket. As with Claude's SWE build commands, Codex's commands can use the container's egress network (public internet; private addresses are blocked). Uncontained adapter use outside the worker keeps Codex's native sandbox.
+
 ### API keys and local models
 
 `config/provider-profiles.api.example.json` shows `mode: "api"` (pay-per-token `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) and `mode: "local"` (Claude Code against your own Anthropic-compatible gateway via `ANTHROPIC_BASE_URL`). Set `AUTOS_REQUIRE_SUBSCRIPTION=false` to allow them. Local mode is Claude-only for now, and the egress firewall blocks private addresses, so a gateway on your LAN needs a firewall exception.

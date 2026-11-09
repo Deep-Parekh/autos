@@ -50,6 +50,18 @@ test('no blanket bypass flags and read-only roles never get write tools or --for
   }
 });
 
+test('inside the worker container Codex uses danger-full-access (the container is the boundary), never the blanket bypass', () => {
+  for (const role of ['swe', 'qa', 'reviewer'] as const) {
+    const args = buildInvocation('codex', role, request('codex', role), 'P', {}, DEFAULT_SWE_BASH_PREFIXES, 'container').args;
+    assert.equal(args[args.indexOf('--sandbox') + 1], 'danger-full-access', role);
+    assert.ok(args.includes('approval_policy="never"'));
+    assert.ok(!args.join(' ').includes('--dangerously-bypass-approvals-and-sandbox'));
+  }
+  // Other providers are unaffected by the codex sandbox mode.
+  assert.deepEqual(buildInvocation('claude', 'qa', request('claude', 'qa'), 'P', {}, DEFAULT_SWE_BASH_PREFIXES, 'container').args, expected.find(([p, r]) => p === 'claude' && r === 'qa')![2]);
+  assert.throws(() => new CliProviderAdapter('codex', { codexSandbox: 'off' as never }));
+});
+
 test('claude model flag is appended after permission flags', () => {
   const args = buildInvocation('claude', 'qa', request('claude', 'qa', { model: 'sonnet' }), 'P', {}).args;
   assert.deepEqual(args.slice(-2), ['--model', 'sonnet']);

@@ -31,6 +31,14 @@ export interface CliAdapterOptions {
   spawnProcess?: typeof spawn;
   /** Clock for rate-limit reset windows and relative retry fields; defaults to `() => new Date()`. */
   now?: () => Date;
+  /**
+   * Codex command sandbox. 'native' (default): Codex's own bubblewrap sandbox (read-only for QA/reviewer, workspace-write
+   * for SWE). 'container': `--sandbox danger-full-access`, for the hardened Autos worker container only, where Docker's
+   * default seccomp profile blocks the user namespaces bubblewrap needs. The container (read-only root, cap-drop ALL,
+   * no-new-privileges, non-root, read-only source mount for QA/reviewer, no host paths or other credentials) is then the
+   * only boundary; commands keep the container's egress network, as Claude SWE build commands already do.
+   */
+  codexSandbox?: 'native' | 'container';
 }
 
 type Invocation = { binary: string; args: string[]; stdin?: string };
@@ -179,7 +187,7 @@ function claudePermissionArgs(role: AgentRole, bashPrefixes: readonly string[]):
   return ['--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--tools', CLAUDE_READ_TOOLS, '--allowedTools', CLAUDE_READ_TOOLS, '--disallowedTools', CLAUDE_READ_DISALLOWED];
 }
 
-function buildInvocation(provider: Provider, role: AgentRole, request: ProviderRequest, prompt: string, binaries: Partial<Record<Provider, string>>, bashPrefixes: readonly string[] = DEFAULT_SWE_BASH_PREFIXES): Invocation {
+function buildInvocation(provider: Provider, role: AgentRole, request: ProviderRequest, prompt: string, binaries: Partial<Record<Provider, string>>, bashPrefixes: readonly string[] = DEFAULT_SWE_BASH_PREFIXES, codexSandbox: 'native' | 'container' = 'native'): Invocation {
   const binary = binaries[provider] ?? defaults[provider];
   const modelArgs = provider === 'cursor' ? ['--model', CURSOR_MODEL] : request.model ? ['--model', request.model] : [];
   // Reasoning effort is its own argv element (never interpolated into a shell): claude `--effort <level>` (claude --help);
@@ -194,12 +202,13 @@ function buildInvocation(provider: Provider, role: AgentRole, request: ProviderR
       return { binary, args: ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', ...claudePermissionArgs(role, bashPrefixes), ...modelArgs, ...effortArgs], stdin: prompt };
     case 'codex':
       // Approval policy "never" (codex exec has no -a flag; -c is documented) so a run can never block on a prompt.
-      // Sandbox stays workspace-write (SWE) / read-only (others). Tradeoff: inside a container with all capabilities
-      // dropped, codex's own landlock sandbox may be unavailable and commands would then fail; the only alternative,
-      // --dangerously-bypass-approvals-and-sandbox, is a blanket bypass forbidden by AGENTS.md, so it is not used.
+      // Native sandbox: workspace-write (SWE) / read-only (others). In the Autos worker container Codex's bubblewrap cannot
+      // create user namespaces (Docker's default seccomp profile), so every command would fail; there the container is
+      // the boundary and Codex runs with danger-full-access (see CliAdapterOptions.codexSandbox). Approvals stay "never";
+      // --dangerously-bypass-approvals-and-sandbox is never used.
       return {
         binary,
-        args: ['exec', '--json', '--ephemeral', '--cd', request.cwd, '--sandbox', mayWrite ? 'workspace-write' : 'read-only', '-c', 'approval_policy="never"', '--skip-git-repo-check', ...modelArgs, ...effortArgs, '-'],
+        args: ['exec', '--json', '--ephemeral', '--cd', request.cwd, '--sandbox', codexSandbox === 'container' ? 'danger-full-access' : mayWrite ? 'workspace-write' : 'read-only', '-c', 'approval_policy="never"', '--skip-git-repo-check', ...modelArgs, ...effortArgs, '-'],
         stdin: prompt,
       };
     case 'cursor':
@@ -642,6 +651,7 @@ function validateOptions(options: CliAdapterOptions): void {
     throw new AutosError('INVALID_CONFIG', 'SWE Bash prefixes must be non-empty command prefixes without shell metacharacters');
   }
   if (options.now !== undefined && typeof options.now !== 'function') throw new AutosError('INVALID_CONFIG', 'Provider adapter clock must be a function');
+  if (options.codexSandbox !== undefined && options.codexSandbox !== 'native' && options.codexSandbox !== 'container') throw new AutosError('INVALID_CONFIG', 'Codex sandbox mode must be native or container');
   const positive = [options.maxOutputBytes, options.maxTranscriptBytes, options.maxPromptBytes, options.killGraceMs]
     .filter((value): value is number => value !== undefined);
   if (positive.some((value) => !Number.isSafeInteger(value) || value <= 0)) throw new AutosError('INVALID_CONFIG', 'Provider adapter limits must be positive integers');
@@ -685,7 +695,7 @@ export class CliProviderAdapter implements ProviderAdapterPort {
       return await this.finish(request, start, { status: 'FAILED', exit_code: null, elapsed_ms: performance.now() - start, result: null, error_code: 'AUTH' }, '[auth profile unavailable]');
     }
     if (signal?.aborted) return await this.finish(request, start, { status: 'CANCELLED', exit_code: null, elapsed_ms: performance.now() - start, result: null, error_code: 'CANCELLED' }, '[cancelled before launch]');
-    const invocation = buildInvocation(this.provider, request.role, request, prompt, this.options.binaries ?? {}, this.options.sweBashPrefixes ?? DEFAULT_SWE_BASH_PREFIXES);
+    const invocation = buildInvocation(this.provider, request.role, request, prompt, this.options.binaries ?? {}, this.options.sweBashPrefixes ?? DEFAULT_SWE_BASH_PREFIXES, this.options.codexSandbox ?? 'native');
     const processResult = await execute(invocation, request, safeEnvironment(this.provider, this.options.baseEnv ?? { PATH: process.env.PATH ?? '' }, auth, resolve(request.cwd)), this.options, signal);
     const redact = makeRedactor(auth);
     const transcript = redact(processResult.stdout + (processResult.stderr ? `\n[stderr]\n${processResult.stderr}` : ''));

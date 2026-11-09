@@ -66,6 +66,9 @@ async function main() {
   const maxPromptBytes = envInteger('AUTOS_MAX_PROMPT_BYTES', DEFAULT_MAX_PROMPT_BYTES, 1_024, 10_000_000);
   const maxTranscriptBytes = envInteger('AUTOS_MAX_TRANSCRIPT_BYTES', DEFAULT_MAX_TRANSCRIPT_BYTES, 65_536, 52_428_800);
   const adapter = new CliProviderAdapter(args.provider, {
+    // This worker always runs in the hardened Autos container, which is the command boundary for Codex
+    // (Codex's own bubblewrap sandbox cannot create user namespaces under Docker's default seccomp profile).
+    codexSandbox: 'container',
     maxPromptBytes,
     maxTranscriptBytes,
     resolveAuth: async (_profile, provider) => Object.fromEntries(authNames[provider].filter((name) => process.env[name]).map((name) => [name, process.env[name]])),
