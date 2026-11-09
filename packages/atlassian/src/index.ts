@@ -1,7 +1,7 @@
 import { parseFragment } from 'parse5';
 import { z } from 'zod';
 import {
-  AutosError, parseJdkCell, parseTomcatCell, issueSnapshotSchema, parseConfig, projectMappingSchema, precedentResultSchema, savedFilterSchema,
+  AutosError, parseJdkCell, parseTomcatCell, issueSnapshotSchema, configSectionSchemas, projectMappingSchema, precedentResultSchema, savedFilterSchema,
   type AtlassianReadPort, type AutosConfig, type IssueSnapshot, type PrecedentReadPort,
   type PrecedentResult, type ProjectMapping, type SavedFilter,
 } from '@autos/contracts';
@@ -237,7 +237,11 @@ export class AtlassianClient implements AtlassianReadPort {
   readonly precedents: PrecedentReadPort;
 
   constructor(private readonly options: AtlassianOptions) {
-    this.config = parseConfig(options.config);
+    // Defense in depth: re-check the sections this client uses (the whole parsed config is resolved output, not input).
+    for (const section of ['jira', 'confluence', 'bitbucket', 'jobs'] as const) {
+      if (!configSectionSchemas[section].safeParse(options.config?.[section]).success) throw safeError('INVALID_CONFIG', `Invalid configuration fields: ${section}`);
+    }
+    this.config = options.config;
     if (!Number.isInteger(options.maxRetries ?? maxRetriesDefault) || (options.maxRetries ?? maxRetriesDefault) < 0 ||
         !Number.isInteger(options.requestTimeoutMs ?? readTimeout) || (options.requestTimeoutMs ?? readTimeout) < 1) {
       throw safeError('INVALID_INPUT', 'Atlassian client timeout and retry settings are invalid');

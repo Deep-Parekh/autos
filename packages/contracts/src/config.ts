@@ -168,7 +168,7 @@ function resolveRole(role: RoleInput, tiers: Record<string, ResolvedChainEntry[]
 
 const binarySchema = z.strictObject({ binary: z.string().min(1), auth_profile: identifierSchema });
 
-export const configSchema = z.strictObject({
+const configObjectSchema = z.strictObject({
   schema_version: z.literal(1),
   jira: z.strictObject({
     site_url: siteUrlSchema, saved_filter_id: z.union([z.string().regex(/^[0-9]+$/), z.number().int().positive().max(Number.MAX_SAFE_INTEGER).transform((id) => String(id))]), // YAML may give 12345 or '12345'
@@ -234,7 +234,13 @@ export const configSchema = z.strictObject({
   security: z.strictObject({ allow_jira_write: z.literal(false), allow_confluence_write: z.literal(false), allow_merge: z.literal(false), allow_deploy: z.literal(false), allow_prod_db: z.literal(false) }),
   storage: z.strictObject({ data_dir: z.string().min(1), artifacts_dir: z.string().min(1), workspaces_dir: z.string().min(1) }),
   api: z.strictObject({ listen_host: z.enum(['127.0.0.1', '::1']), port: z.number().int().min(1024).max(65535), operator_token_env: envNameSchema }),
-}).superRefine((config, ctx) => {
+});
+/**
+ * Per-section schemas of the configuration file (input form). A parsed AutosConfig is the resolved output (tier ladders
+ * expanded), which is not valid input again; components that re-check a received config validate their own sections.
+ */
+export const configSectionSchemas = configObjectSchema.shape;
+export const configSchema = configObjectSchema.superRefine((config, ctx) => {
   const repositories = new Set<string>();
   config.bitbucket.allowed_repositories.forEach((repo, i) => {
     const id = `${repo.workspace}/${repo.repository_slug}`;

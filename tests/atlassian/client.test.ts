@@ -236,3 +236,14 @@ test('Bitbucket repeated pagination URLs fail closed and pre-aborted diffs do no
   assert.equal(bbCalls, 1);
 });
 
+
+test('a config with model tiers and ladders (resolved output) is accepted; a broken Jira section still fails closed', () => {
+  const text = readFileSync('config/config.example.yaml', 'utf8').replace(/^agents:\n(?:  .*\n)+/m, '')
+    + 'models:\n  luna: {provider: codex, model: gpt-6-luna}\nmodel_tiers:\n  sm: [luna:high]\n  med: [{provider: claude, model: sonnet, effort: high}]\n'
+    + 'triage: {tier: sm}\nagents:\n  swe: {ladder: [sm, med]}\n  qa: {ladder: [sm, med]}\n  reviewer: {ladder: [sm, med], min: med}\n';
+  const tiered = parseConfigYaml(text);
+  assert.ok(tiered.agents.swe.ladder);
+  const credentials = { jira: { username: 'u@example.com', token: 't' }, confluence: { username: 'u@example.com', token: 't' } };
+  assert.doesNotThrow(() => createAtlassianClient({ config: tiered, credentials }));
+  assert.throws(() => createAtlassianClient({ config: { ...tiered, jira: { ...tiered.jira, read_only: false } } as never, credentials }), (error: unknown) => error instanceof AutosError && error.code === 'INVALID_CONFIG');
+});
