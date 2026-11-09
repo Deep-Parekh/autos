@@ -4,7 +4,7 @@ import { jdkVersionSchema, tomcatVersionSchema } from './toolchain.js';
 export const SCHEMA_VERSION = 1 as const;
 export const PROVIDERS = ['claude', 'codex', 'cursor'] as const;
 export const ROLES = ['swe', 'qa', 'reviewer'] as const;
-export const JOB_STATES = ['QUEUED', 'INVESTIGATING', 'PLANNED', 'IMPLEMENTING', 'QA', 'REVIEW', 'REVISING', 'READY_FOR_HUMAN', 'BLOCKED', 'CANCELLING', 'CANCELLED'] as const;
+export const JOB_STATES = ['QUEUED', 'INVESTIGATING', 'PLANNED', 'IMPLEMENTING', 'QA', 'REVIEW', 'REVISING', 'PAUSED', 'READY_FOR_HUMAN', 'BLOCKED', 'CANCELLING', 'CANCELLED'] as const;
 export const providerSchema = z.enum(PROVIDERS);
 export const roleSchema = z.enum(ROLES);
 export const jobStateSchema = z.enum(JOB_STATES);

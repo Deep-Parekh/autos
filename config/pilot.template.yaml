@@ -71,6 +71,9 @@ jobs:
   workspace_retention_hours: 72
   auto_prune_workspaces: true
   similar_tickets: {enabled: true, max_candidates: 5}
+  # When every provider of a role is rate limited the attempt pauses (no slot) and resumes in the same workspace at the
+  # provider-reported reset, else after initial_minutes doubling per pause up to max_minutes; BLOCKED after max_total_hours.
+  rate_limit_pause: {initial_minutes: 15, max_minutes: 240, max_total_hours: 24}
 
 build_profiles:
   pilot-java:

@@ -43,6 +43,14 @@ export interface GitPrepareRequest {
   mapping: ProjectMapping; workspaces_root: string;
   continue_from?: GitContinuation;
 }
+/**
+ * Re-adopt a workspace this runner prepared earlier (possibly before a controller restart) so a paused attempt can
+ * resume in it. `seal` is the opaque value sealWorkspace() returned at pause time; reopen refuses unless the workspace
+ * is still exactly where and what it was (directory, branch, start commit, remote and Git metadata digests).
+ */
+export interface GitReopenRequest {
+  workspace: GitWorkspace; mapping: ProjectMapping; workspaces_root: string; seal: string;
+}
 export interface GitCandidate {
   /** Cumulative identity/diff relative to base_sha (what is ultimately handed off). */
   digest: string; paths: string[]; diff: string;
@@ -84,6 +92,10 @@ export interface GitRunnerPort {
    * content or null. Trusted code; refuses symlinks/non-regular files. Always leaves HANDOFF_DIR absent.
    */
   takeHandoff(workspace: GitWorkspace, signal?: AbortSignal): Promise<string | null>;
+  /** Optional: tamper-evidence digest of a prepared workspace's trusted Git state (stored with a paused attempt). */
+  sealWorkspace?(workspace: GitWorkspace, signal?: AbortSignal): Promise<string>;
+  /** Optional: re-adopt a sealed workspace (see GitReopenRequest). Without it, a paused attempt cannot resume. */
+  reopen?(request: GitReopenRequest, signal?: AbortSignal): Promise<GitWorkspace>;
 }
 export interface ProviderRequest {
   job_id: string; issue_key: string; provider: Provider; role: AgentRole;
@@ -96,6 +108,8 @@ export interface ProviderResult {
   provider: Provider; role: AgentRole; status: 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT';
   exit_code: number | null; elapsed_ms: number; transcript_path: string;
   result: unknown; error_code?: ErrorCode; model?: string;
+  /** RATE_LIMIT only: provider-reported limit reset time (ISO), from structured output; absent when unknown. */
+  retry_at?: string;
 }
 /** Executes within an already established boundary; not a host sandbox. */
 export interface ProviderAdapterPort { run(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> }
@@ -105,6 +119,11 @@ export interface RunnerPort {
   stop(jobId: string): Promise<void>;
   /** Optional readiness of the isolation boundary (supervisor + Docker). Must not start a container. */
   health?(): Promise<RunnerHealth>;
+  /**
+   * Optional: delete the job's persistent SWE scratch (reused by every SWE invocation of that job). Called when the job
+   * becomes terminal, is cancelled or its workspace is pruned. Idempotent; a missing scratch is not an error.
+   */
+  releaseJobScratch?(jobId: string): Promise<void>;
 }
 export interface RunChecksOptions {
   /** JDK/Tomcat for the checks container; absent uses the checks image's built-in JDK. Recorded in Checks.toolchain. */
@@ -134,6 +153,12 @@ export interface JobRecord {
   revision?: number;
   /** Issue-level closure (see issueClosureSchema); closed issues accept no new attempt, revision or retry. */
   closed_as?: IssueResolution;
+  /** PAUSED only (see jobRecordSchema): resume time, limit code, limited role, streak start and length. */
+  resume_at?: string;
+  pause_code?: ErrorCode;
+  paused_role?: AgentRole;
+  paused_since?: string;
+  pause_count?: number;
 }
 export interface JobStorePort {
   create(job: JobRecord): Promise<void>;

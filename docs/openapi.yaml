@@ -636,6 +636,7 @@ paths:
                             - QA
                             - REVIEW
                             - REVISING
+                            - PAUSED
                             - READY_FOR_HUMAN
                             - BLOCKED
                             - CANCELLING
@@ -703,6 +704,50 @@ paths:
                             - MERGED
                             - ABANDONED
                           description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                        resume_at:
+                          type: string
+                          format: date-time
+                          description: "PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff)."
+                        pause_code:
+                          type: string
+                          enum:
+                            - INVALID_CONFIG
+                            - INVALID_INPUT
+                            - AUTH
+                            - FORBIDDEN
+                            - NOT_FOUND
+                            - RATE_LIMIT
+                            - UPSTREAM
+                            - MAPPING
+                            - BRANCH_COLLISION
+                            - POLICY
+                            - TIMEOUT
+                            - CANCELLED
+                            - CONTEXT
+                            - TOOL
+                            - INVALID_OUTPUT
+                            - STALE_CANDIDATE
+                            - CHECK_FAILED
+                            - CONFLICT
+                            - INTERNAL
+                            - UNAVAILABLE
+                          description: "PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran."
+                        paused_role:
+                          type: string
+                          enum:
+                            - swe
+                            - qa
+                            - reviewer
+                          description: "PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider."
+                        paused_since:
+                          type: string
+                          format: date-time
+                          description: "PAUSED only: start of the pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours."
+                        pause_count:
+                          type: integer
+                          minimum: 1
+                          maximum: 1000
+                          description: "PAUSED only: pauses in the current streak."
                       required:
                         - job_id
                         - issue_key
@@ -981,6 +1026,7 @@ paths:
                             - QA
                             - REVIEW
                             - REVISING
+                            - PAUSED
                             - READY_FOR_HUMAN
                             - BLOCKED
                             - CANCELLING
@@ -1048,6 +1094,50 @@ paths:
                             - MERGED
                             - ABANDONED
                           description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                        resume_at:
+                          type: string
+                          format: date-time
+                          description: "PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff)."
+                        pause_code:
+                          type: string
+                          enum:
+                            - INVALID_CONFIG
+                            - INVALID_INPUT
+                            - AUTH
+                            - FORBIDDEN
+                            - NOT_FOUND
+                            - RATE_LIMIT
+                            - UPSTREAM
+                            - MAPPING
+                            - BRANCH_COLLISION
+                            - POLICY
+                            - TIMEOUT
+                            - CANCELLED
+                            - CONTEXT
+                            - TOOL
+                            - INVALID_OUTPUT
+                            - STALE_CANDIDATE
+                            - CHECK_FAILED
+                            - CONFLICT
+                            - INTERNAL
+                            - UNAVAILABLE
+                          description: "PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran."
+                        paused_role:
+                          type: string
+                          enum:
+                            - swe
+                            - qa
+                            - reviewer
+                          description: "PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider."
+                        paused_since:
+                          type: string
+                          format: date-time
+                          description: "PAUSED only: start of the pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours."
+                        pause_count:
+                          type: integer
+                          minimum: 1
+                          maximum: 1000
+                          description: "PAUSED only: pauses in the current streak."
                       required:
                         - job_id
                         - issue_key
@@ -1353,6 +1443,7 @@ paths:
                       - QA
                       - REVIEW
                       - REVISING
+                      - PAUSED
                       - READY_FOR_HUMAN
                       - BLOCKED
                       - CANCELLING
@@ -1420,6 +1511,50 @@ paths:
                       - MERGED
                       - ABANDONED
                     description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  resume_at:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff)."
+                  pause_code:
+                    type: string
+                    enum:
+                      - INVALID_CONFIG
+                      - INVALID_INPUT
+                      - AUTH
+                      - FORBIDDEN
+                      - NOT_FOUND
+                      - RATE_LIMIT
+                      - UPSTREAM
+                      - MAPPING
+                      - BRANCH_COLLISION
+                      - POLICY
+                      - TIMEOUT
+                      - CANCELLED
+                      - CONTEXT
+                      - TOOL
+                      - INVALID_OUTPUT
+                      - STALE_CANDIDATE
+                      - CHECK_FAILED
+                      - CONFLICT
+                      - INTERNAL
+                      - UNAVAILABLE
+                    description: "PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran."
+                  paused_role:
+                    type: string
+                    enum:
+                      - swe
+                      - qa
+                      - reviewer
+                    description: "PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider."
+                  paused_since:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: start of the pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours."
+                  pause_count:
+                    type: integer
+                    minimum: 1
+                    maximum: 1000
+                    description: "PAUSED only: pauses in the current streak."
                 required:
                   - job_id
                   - issue_key
@@ -2004,6 +2139,7 @@ paths:
                       - QA
                       - REVIEW
                       - REVISING
+                      - PAUSED
                       - READY_FOR_HUMAN
                       - BLOCKED
                       - CANCELLING
@@ -2071,6 +2207,50 @@ paths:
                       - MERGED
                       - ABANDONED
                     description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  resume_at:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff)."
+                  pause_code:
+                    type: string
+                    enum:
+                      - INVALID_CONFIG
+                      - INVALID_INPUT
+                      - AUTH
+                      - FORBIDDEN
+                      - NOT_FOUND
+                      - RATE_LIMIT
+                      - UPSTREAM
+                      - MAPPING
+                      - BRANCH_COLLISION
+                      - POLICY
+                      - TIMEOUT
+                      - CANCELLED
+                      - CONTEXT
+                      - TOOL
+                      - INVALID_OUTPUT
+                      - STALE_CANDIDATE
+                      - CHECK_FAILED
+                      - CONFLICT
+                      - INTERNAL
+                      - UNAVAILABLE
+                    description: "PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran."
+                  paused_role:
+                    type: string
+                    enum:
+                      - swe
+                      - qa
+                      - reviewer
+                    description: "PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider."
+                  paused_since:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: start of the pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours."
+                  pause_count:
+                    type: integer
+                    minimum: 1
+                    maximum: 1000
+                    description: "PAUSED only: pauses in the current streak."
                 required:
                   - job_id
                   - issue_key
@@ -2365,6 +2545,7 @@ paths:
                       - QA
                       - REVIEW
                       - REVISING
+                      - PAUSED
                       - READY_FOR_HUMAN
                       - BLOCKED
                       - CANCELLING
@@ -2432,6 +2613,50 @@ paths:
                       - MERGED
                       - ABANDONED
                     description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  resume_at:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff)."
+                  pause_code:
+                    type: string
+                    enum:
+                      - INVALID_CONFIG
+                      - INVALID_INPUT
+                      - AUTH
+                      - FORBIDDEN
+                      - NOT_FOUND
+                      - RATE_LIMIT
+                      - UPSTREAM
+                      - MAPPING
+                      - BRANCH_COLLISION
+                      - POLICY
+                      - TIMEOUT
+                      - CANCELLED
+                      - CONTEXT
+                      - TOOL
+                      - INVALID_OUTPUT
+                      - STALE_CANDIDATE
+                      - CHECK_FAILED
+                      - CONFLICT
+                      - INTERNAL
+                      - UNAVAILABLE
+                    description: "PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran."
+                  paused_role:
+                    type: string
+                    enum:
+                      - swe
+                      - qa
+                      - reviewer
+                    description: "PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider."
+                  paused_since:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: start of the pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours."
+                  pause_count:
+                    type: integer
+                    minimum: 1
+                    maximum: 1000
+                    description: "PAUSED only: pauses in the current streak."
                 required:
                   - job_id
                   - issue_key
@@ -2768,6 +2993,7 @@ paths:
                             - QA
                             - REVIEW
                             - REVISING
+                            - PAUSED
                             - READY_FOR_HUMAN
                             - BLOCKED
                             - CANCELLING
@@ -3172,6 +3398,7 @@ paths:
                             - QA
                             - REVIEW
                             - REVISING
+                            - PAUSED
                             - READY_FOR_HUMAN
                             - BLOCKED
                             - CANCELLING
@@ -3239,6 +3466,50 @@ paths:
                             - MERGED
                             - ABANDONED
                           description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                        resume_at:
+                          type: string
+                          format: date-time
+                          description: "PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff)."
+                        pause_code:
+                          type: string
+                          enum:
+                            - INVALID_CONFIG
+                            - INVALID_INPUT
+                            - AUTH
+                            - FORBIDDEN
+                            - NOT_FOUND
+                            - RATE_LIMIT
+                            - UPSTREAM
+                            - MAPPING
+                            - BRANCH_COLLISION
+                            - POLICY
+                            - TIMEOUT
+                            - CANCELLED
+                            - CONTEXT
+                            - TOOL
+                            - INVALID_OUTPUT
+                            - STALE_CANDIDATE
+                            - CHECK_FAILED
+                            - CONFLICT
+                            - INTERNAL
+                            - UNAVAILABLE
+                          description: "PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran."
+                        paused_role:
+                          type: string
+                          enum:
+                            - swe
+                            - qa
+                            - reviewer
+                          description: "PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider."
+                        paused_since:
+                          type: string
+                          format: date-time
+                          description: "PAUSED only: start of the pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours."
+                        pause_count:
+                          type: integer
+                          minimum: 1
+                          maximum: 1000
+                          description: "PAUSED only: pauses in the current streak."
                       required:
                         - job_id
                         - issue_key
@@ -3347,6 +3618,7 @@ paths:
                           - QA
                           - REVIEW
                           - REVISING
+                          - PAUSED
                           - READY_FOR_HUMAN
                           - BLOCKED
                           - CANCELLING
@@ -4225,6 +4497,7 @@ paths:
                       - QA
                       - REVIEW
                       - REVISING
+                      - PAUSED
                       - READY_FOR_HUMAN
                       - BLOCKED
                       - CANCELLING
@@ -5234,6 +5507,7 @@ paths:
                             - QA
                             - REVIEW
                             - REVISING
+                            - PAUSED
                             - READY_FOR_HUMAN
                             - BLOCKED
                             - CANCELLING
@@ -5513,6 +5787,7 @@ paths:
                             - QA
                             - REVIEW
                             - REVISING
+                            - PAUSED
                             - READY_FOR_HUMAN
                             - BLOCKED
                             - CANCELLING
@@ -5842,6 +6117,7 @@ paths:
                             - QA
                             - REVIEW
                             - REVISING
+                            - PAUSED
                             - READY_FOR_HUMAN
                             - BLOCKED
                             - CANCELLING
@@ -6188,6 +6464,7 @@ paths:
                       - QA
                       - REVIEW
                       - REVISING
+                      - PAUSED
                       - READY_FOR_HUMAN
                       - BLOCKED
                       - CANCELLING
@@ -6255,6 +6532,50 @@ paths:
                       - MERGED
                       - ABANDONED
                     description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  resume_at:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff)."
+                  pause_code:
+                    type: string
+                    enum:
+                      - INVALID_CONFIG
+                      - INVALID_INPUT
+                      - AUTH
+                      - FORBIDDEN
+                      - NOT_FOUND
+                      - RATE_LIMIT
+                      - UPSTREAM
+                      - MAPPING
+                      - BRANCH_COLLISION
+                      - POLICY
+                      - TIMEOUT
+                      - CANCELLED
+                      - CONTEXT
+                      - TOOL
+                      - INVALID_OUTPUT
+                      - STALE_CANDIDATE
+                      - CHECK_FAILED
+                      - CONFLICT
+                      - INTERNAL
+                      - UNAVAILABLE
+                    description: "PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran."
+                  paused_role:
+                    type: string
+                    enum:
+                      - swe
+                      - qa
+                      - reviewer
+                    description: "PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider."
+                  paused_since:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: start of the pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours."
+                  pause_count:
+                    type: integer
+                    minimum: 1
+                    maximum: 1000
+                    description: "PAUSED only: pauses in the current streak."
                 required:
                   - job_id
                   - issue_key
@@ -6786,6 +7107,7 @@ paths:
                       - QA
                       - REVIEW
                       - REVISING
+                      - PAUSED
                       - READY_FOR_HUMAN
                       - BLOCKED
                       - CANCELLING
@@ -6853,6 +7175,50 @@ paths:
                       - MERGED
                       - ABANDONED
                     description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  resume_at:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff)."
+                  pause_code:
+                    type: string
+                    enum:
+                      - INVALID_CONFIG
+                      - INVALID_INPUT
+                      - AUTH
+                      - FORBIDDEN
+                      - NOT_FOUND
+                      - RATE_LIMIT
+                      - UPSTREAM
+                      - MAPPING
+                      - BRANCH_COLLISION
+                      - POLICY
+                      - TIMEOUT
+                      - CANCELLED
+                      - CONTEXT
+                      - TOOL
+                      - INVALID_OUTPUT
+                      - STALE_CANDIDATE
+                      - CHECK_FAILED
+                      - CONFLICT
+                      - INTERNAL
+                      - UNAVAILABLE
+                    description: "PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran."
+                  paused_role:
+                    type: string
+                    enum:
+                      - swe
+                      - qa
+                      - reviewer
+                    description: "PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider."
+                  paused_since:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: start of the pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours."
+                  pause_count:
+                    type: integer
+                    minimum: 1
+                    maximum: 1000
+                    description: "PAUSED only: pauses in the current streak."
                 required:
                   - job_id
                   - issue_key
@@ -7184,6 +7550,7 @@ paths:
                               - QA
                               - REVIEW
                               - REVISING
+                              - PAUSED
                               - READY_FOR_HUMAN
                               - BLOCKED
                               - CANCELLING
@@ -7268,6 +7635,7 @@ paths:
                                 - QA
                                 - REVIEW
                                 - REVISING
+                                - PAUSED
                                 - READY_FOR_HUMAN
                                 - BLOCKED
                                 - CANCELLING
@@ -7331,6 +7699,113 @@ paths:
                             - role
                             - provider
                             - started_at
+                      paused_jobs:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          description: A PAUSED attempt (holds no slot) waiting for provider limits to reset.
+                          properties:
+                            job_id:
+                              type: string
+                              format: uuid
+                            issue_key:
+                              type: string
+                            repair_round:
+                              type: integer
+                              minimum: 0
+                              maximum: 2
+                            role:
+                              type:
+                                - string
+                                - "null"
+                              enum:
+                                - swe
+                                - qa
+                                - reviewer
+                                - null
+                            code:
+                              type:
+                                - string
+                                - "null"
+                              enum:
+                                - INVALID_CONFIG
+                                - INVALID_INPUT
+                                - AUTH
+                                - FORBIDDEN
+                                - NOT_FOUND
+                                - RATE_LIMIT
+                                - UPSTREAM
+                                - MAPPING
+                                - BRANCH_COLLISION
+                                - POLICY
+                                - TIMEOUT
+                                - CANCELLED
+                                - CONTEXT
+                                - TOOL
+                                - INVALID_OUTPUT
+                                - STALE_CANDIDATE
+                                - CHECK_FAILED
+                                - CONFLICT
+                                - INTERNAL
+                                - UNAVAILABLE
+                                - null
+                            resume_at:
+                              type:
+                                - string
+                                - "null"
+                              format: date-time
+                            paused_since:
+                              type:
+                                - string
+                                - "null"
+                              format: date-time
+                            pause_count:
+                              type: integer
+                              minimum: 0
+                          required:
+                            - job_id
+                            - issue_key
+                            - repair_round
+                            - role
+                            - code
+                            - resume_at
+                            - paused_since
+                            - pause_count
+                      provider_limits:
+                        type: object
+                        additionalProperties: false
+                        description: "Known provider limits and the new-ticket gate: while every SWE-chain provider is limited, new QUEUED tickets wait (due PAUSED attempts still resume)."
+                        properties:
+                          providers:
+                            type: array
+                            items:
+                              type: object
+                              additionalProperties: false
+                              properties:
+                                provider:
+                                  type: string
+                                  enum:
+                                    - claude
+                                    - codex
+                                    - cursor
+                                until:
+                                  type: string
+                                  format: date-time
+                              required:
+                                - provider
+                                - until
+                          gate_active:
+                            type: boolean
+                          gate_until:
+                            type:
+                              - string
+                              - "null"
+                            format: date-time
+                        required:
+                          - providers
+                          - gate_active
+                          - gate_until
                       slots:
                         type: object
                         additionalProperties: false
@@ -7403,6 +7878,8 @@ paths:
                     required:
                       - active
                       - active_jobs
+                      - paused_jobs
+                      - provider_limits
                       - slots
                       - polling
                       - counts
@@ -7434,6 +7911,7 @@ paths:
                             - QA
                             - REVIEW
                             - REVISING
+                            - PAUSED
                             - READY_FOR_HUMAN
                             - BLOCKED
                             - CANCELLING
@@ -7525,6 +8003,11 @@ paths:
                 activity:
                   active: null
                   active_jobs: []
+                  paused_jobs: []
+                  provider_limits:
+                    providers: []
+                    gate_active: false
+                    gate_until: null
                   slots:
                     max_parallel: 1
                     in_use: 0
@@ -7809,6 +8292,10 @@ paths:
                             - provider_fallback
                             - issue_closed
                             - workspaces_pruned
+                            - job_paused
+                            - job_resumed
+                            - provider_gate_opened
+                            - provider_gate_closed
                         job_id:
                           type:
                             - string
@@ -7828,6 +8315,7 @@ paths:
                             - QA
                             - REVIEW
                             - REVISING
+                            - PAUSED
                             - READY_FOR_HUMAN
                             - BLOCKED
                             - CANCELLING
@@ -7902,6 +8390,10 @@ paths:
                         message:
                           type: string
                           maxLength: 300
+                        resume_at:
+                          type: string
+                          format: date-time
+                          description: "job_paused: when the attempt is due to resume; provider_gate_opened: when the new-ticket gate lifts at the latest."
                       required:
                         - event_id
                         - at
@@ -8186,6 +8678,10 @@ paths:
                             - provider_fallback
                             - issue_closed
                             - workspaces_pruned
+                            - job_paused
+                            - job_resumed
+                            - provider_gate_opened
+                            - provider_gate_closed
                         job_id:
                           type:
                             - string
@@ -8205,6 +8701,7 @@ paths:
                             - QA
                             - REVIEW
                             - REVISING
+                            - PAUSED
                             - READY_FOR_HUMAN
                             - BLOCKED
                             - CANCELLING
@@ -8279,6 +8776,10 @@ paths:
                         message:
                           type: string
                           maxLength: 300
+                        resume_at:
+                          type: string
+                          format: date-time
+                          description: "job_paused: when the attempt is due to resume; provider_gate_opened: when the new-ticket gate lifts at the latest."
                       required:
                         - event_id
                         - at

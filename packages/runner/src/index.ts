@@ -398,15 +398,20 @@ export class DockerRunner implements RunnerPort {
       this.track(request.job_id, name);
       let envPath: string | undefined;
       let scratch: string | undefined;
+      // SWE keeps one scratch per job (reused across fallbacks, repairs and resumes); QA/reviewer get a throwaway one.
+      let removeScratch = false;
       try {
-        if (toolchain) scratch = await this.createScratch();
+        if (toolchain) {
+          if (request.role === 'swe') scratch = await this.ensureJobScratch(request.job_id);
+          else { scratch = await this.createScratch(); removeScratch = true; }
+        }
         const envDir = await mkdtemp(join(this.options.envRoot ?? tmpdir(), 'autos-auth-'));
         envPath = join(envDir, 'provider.env');
         await writeFile(envPath, `${envText}\n`, { mode: 0o600, flag: 'wx' });
         await chmod(envPath, 0o600);
       } catch (error) {
         this.untrack(request.job_id, name);
-        if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
+        if (scratch && removeScratch) await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
         if (error instanceof AutosError) throw error;
         throw new AutosError('AUTH', 'Provider authentication profile is unavailable');
       }
@@ -437,8 +442,8 @@ export class DockerRunner implements RunnerPort {
             if (normalized.provider === request.provider && normalized.role === request.role && normalized.model === request.model && normalized.transcript_path === expectedTranscript && exitConsistent) {
               // A worker that failed before running the provider may legitimately have no transcript; success always needs one.
               if (normalized.status === 'SUCCEEDED' && !(await isSafeTranscript(request.transcript_path, outputDir))) throw new AutosError('INVALID_OUTPUT', 'Runner did not create a valid private transcript');
-              const { model: returnedModel, error_code: returnedError, ...fields } = normalized;
-              return { ...fields, transcript_path: request.transcript_path, elapsed_ms: performance.now() - started, ...(returnedModel === undefined ? {} : { model: returnedModel }), ...(returnedError === undefined ? {} : { error_code: returnedError }) };
+              const { model: returnedModel, error_code: returnedError, retry_at: retryAt, ...fields } = normalized;
+              return { ...fields, transcript_path: request.transcript_path, elapsed_ms: performance.now() - started, ...(returnedModel === undefined ? {} : { model: returnedModel }), ...(returnedError === undefined ? {} : { error_code: returnedError }), ...(retryAt === undefined ? {} : { retry_at: retryAt }) };
             }
           } catch { /* Generic tool failure below; never return raw process output. */ }
         }
@@ -449,7 +454,7 @@ export class DockerRunner implements RunnerPort {
         return { provider: request.provider, role: request.role, status, exit_code: result.code, elapsed_ms: performance.now() - started, transcript_path: request.transcript_path, result: infrastructure ? { reason: INFRA_REASON } : killed ? { reason: ROLE_OOM_REASON } : null, error_code: errorCode, ...(request.model ? { model: request.model } : {}) };
       } finally {
         try { await this.removeContainer(name); }
-        finally { if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => undefined); if (envPath) await rm(dirname(envPath), { recursive: true, force: true }); this.untrack(request.job_id, name); }
+        finally { if (scratch && removeScratch) await rm(scratch, { recursive: true, force: true }).catch(() => undefined); if (envPath) await rm(dirname(envPath), { recursive: true, force: true }); this.untrack(request.job_id, name); }
       }
     };
     if (authDirectory === undefined) return await launch(undefined);
@@ -579,14 +584,75 @@ export class DockerRunner implements RunnerPort {
     ];
   }
 
-  /** Per-invocation disk scratch for role containers; the caller removes it. */
+  /**
+   * Per-invocation disk scratch for QA/reviewer role containers; the caller removes it after the run. Names are bare
+   * random UUIDs (hex and dashes only), so they can never collide with the `swe-<job_id>` job scratch names.
+   */
   private async createScratch(): Promise<string> {
-    const parent = resolve(this.options.outputRoot, '.scratch');
-    await mkdir(parent, { recursive: true, mode: 0o700 });
+    const parent = await this.scratchParent();
     const scratch = join(parent, randomUUID());
     await mkdir(scratch, { mode: 0o700 });
     try { await this.handOver(scratch); } catch (error) { await rm(scratch, { recursive: true, force: true }).catch(() => undefined); throw error; }
     return scratch;
+  }
+
+  /** Canonical `<outputRoot>/.scratch`, created private on first use; must be a real directory inside the output root. */
+  private async scratchParent(): Promise<string> {
+    const outputRoot = await canonical(this.options.outputRoot);
+    const parent = join(outputRoot, '.scratch');
+    await mkdir(parent, { recursive: true, mode: 0o700 });
+    const info = await lstat(parent);
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new AutosError('POLICY', 'Role scratch directory must be a private directory');
+    const real = await canonical(parent);
+    if (real === outputRoot || !isInside(outputRoot, real)) throw new AutosError('POLICY', 'Role scratch directory must be inside its configured directory');
+    return real;
+  }
+
+  /**
+   * The SWE role's per-job scratch `<outputRoot>/.scratch/swe-<job_id>`: created on first use and reused by every later
+   * SWE invocation of the same job (fallbacks, repair rounds, resumes) so build state survives. It is never mounted for
+   * QA or review and is removed only by releaseJobScratch or the supervisor's startup sweep.
+   */
+  private async ensureJobScratch(jobId: string): Promise<string> {
+    const id = jobIdSchema.parse(jobId);
+    const parent = await this.scratchParent();
+    const name = `swe-${id}`;
+    try { await mkdir(join(parent, name), { mode: 0o700 }); }
+    catch (error) { if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') throw new AutosError('UNAVAILABLE', 'Role scratch directory could not be created', { retryable: true }); }
+    // A real directory (not a symlink) directly inside the canonical scratch parent.
+    const scratch = await realDirectoryInside(parent, name);
+    if (scratch === undefined || dirname(scratch) !== parent) throw new AutosError('POLICY', 'Role scratch directory must be a private directory');
+    await this.handOver(scratch);
+    return scratch;
+  }
+
+  /** Remove the SWE job scratch for a finished job. Idempotent; a symlink planted at the name is unlinked, never followed. */
+  async releaseJobScratch(jobId: string): Promise<void> {
+    if (!jobIdSchema.safeParse(jobId).success) throw new AutosError('INVALID_INPUT', 'Release scratch request is invalid');
+    let parent: string;
+    try {
+      const outputRoot = await realpath(this.options.outputRoot);
+      parent = join(outputRoot, '.scratch');
+      const parentInfo = await lstat(parent);
+      // Never act through a replaced scratch parent; only the runner-created private directory holds job scratch.
+      if (parentInfo.isSymbolicLink() || !parentInfo.isDirectory()) return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return;
+      throw new AutosError('UNAVAILABLE', 'Role scratch directory could not be released', { retryable: true });
+    }
+    const path = join(parent, `swe-${jobId}`);
+    let info;
+    try { info = await lstat(path); } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return;
+      throw new AutosError('UNAVAILABLE', 'Role scratch directory could not be released', { retryable: true });
+    }
+    try {
+      if (info.isDirectory()) await rm(path, { recursive: true, force: true });
+      else await unlink(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return;
+      throw new AutosError('UNAVAILABLE', 'Role scratch directory could not be released', { retryable: true });
+    }
   }
 
   /** When the supervisor runs as root it hands the private directory to the container user; otherwise the uids must already match. */
@@ -634,7 +700,9 @@ export class DockerRunner implements RunnerPort {
 
   /**
    * Startup recovery for a supervisor that crashed or was killed: force-remove every container carrying the autos job
-   * label, delete stale check scratch directories and stale provider env directories. Must run only when no other
+   * label, delete stale check scratch directories, every role scratch directory under `.scratch` (per-invocation QA/review
+   * scratch and the per-job `swe-<job_id>` SWE scratch alike, so a paused job resumed after a supervisor restart starts
+   * with an empty SWE scratch) and stale provider env directories. Must run only when no other
    * supervisor owns the same Docker host (createSupervisorServer calls it after the socket is claimed).
    */
   async sweep(): Promise<{ containers: number; scratch: number; envDirs: number }> {
@@ -858,6 +926,16 @@ export async function createSupervisorServer(options: RunnerSupervisorOptions): 
         record.status = result.checks.some((check) => check.status === 'FAIL') ? 'FAIL' : result.checks.some((check) => check.status === 'NOT_RUN') ? 'NOT_RUN' : 'PASS';
         res.end(safeJson(result)); return;
       }
+      if (req.url === '/v1/release-scratch') {
+        record.action = 'release-scratch';
+        const value = body as { jobId?: string };
+        if (!jobIdSchema.safeParse(value?.jobId).success) throw new AutosError('INVALID_INPUT', 'Release scratch request is invalid');
+        const jobId = jobIdSchema.parse(value.jobId);
+        record.job_id = jobId;
+        if (typeof options.runner.releaseJobScratch === 'function') await options.runner.releaseJobScratch(jobId);
+        record.status = 'RELEASED';
+        res.end(safeJson({ released: true })); return;
+      }
       if (req.url === '/v1/stop') {
         record.action = 'stop';
         const value = body as { jobId?: string };
@@ -962,8 +1040,8 @@ export class DockerRunnerClient implements RunnerPort {
     try {
       const response = providerResultSchema.parse(await this.call('/v1/run-role', parsed, signal, parsed.timeout_ms + 30_000));
       if (response.provider !== parsed.provider || response.role !== parsed.role || response.model !== parsed.model || response.transcript_path !== parsed.transcript_path) throw new AutosError('INVALID_OUTPUT', 'Runner supervisor returned mismatched role evidence');
-      const { model, error_code: errorCode, ...fields } = response;
-      return { ...fields, ...(model === undefined ? {} : { model }), ...(errorCode === undefined ? {} : { error_code: errorCode }) };
+      const { model, error_code: errorCode, retry_at: retryAt, ...fields } = response;
+      return { ...fields, ...(model === undefined ? {} : { model }), ...(errorCode === undefined ? {} : { error_code: errorCode }), ...(retryAt === undefined ? {} : { retry_at: retryAt }) };
     } catch (error) {
       if (!(error instanceof AutosError) || !['CANCELLED', 'TIMEOUT'].includes(error.code)) throw error;
       const status = error.code === 'CANCELLED' ? 'CANCELLED' : 'TIMED_OUT';
@@ -982,6 +1060,7 @@ export class DockerRunnerClient implements RunnerPort {
     }
   }
   async stop(jobId: string): Promise<void> { if (!jobIdSchema.safeParse(jobId).success) throw new AutosError('INVALID_INPUT', 'Stop request is invalid'); await this.call('/v1/stop', { jobId }, undefined, 30_000); }
+  async releaseJobScratch(jobId: string): Promise<void> { if (!jobIdSchema.safeParse(jobId).success) throw new AutosError('INVALID_INPUT', 'Release scratch request is invalid'); await this.call('/v1/release-scratch', { jobId }, undefined, 30_000); }
 }
 
 function isAuthSummary(value: unknown): value is ProviderAuthSummary {

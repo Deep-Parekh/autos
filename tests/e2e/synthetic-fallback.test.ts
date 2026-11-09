@@ -102,14 +102,38 @@ test('(d) reviewer cursor emitting malformed output falls back to claude; cursor
   } finally { await r.scenario.cleanup(); }
 });
 
-test('(e) a chain where every provider fails blocks with the last code and records all attempts', { timeout: 300_000 }, async () => {
-  const r = await run({ roleChains: { qa: { provider: 'codex', fallbacks: ['claude'] } }, providerBehavior: { codex: { qa: 'rate_limit' }, claude: { qa: 'upstream' } } });
+test('(e) a chain where every provider fails with a non-capacity mix blocks with the last code and records all attempts', { timeout: 300_000 }, async () => {
+  const r = await run({ roleChains: { qa: { provider: 'codex', fallbacks: ['claude'] } }, providerBehavior: { codex: { qa: 'rate_limit' }, claude: { qa: 'auth' } } });
   try {
     assert.equal(r.job.state, 'BLOCKED', JSON.stringify(r.job));
-    assert.equal(r.job.blocked_code, 'UPSTREAM');
-    assert.deepEqual(r.invocations, ['swe:claude', ...times(3, 'qa:codex'), ...times(3, 'qa:claude')]);
-    assert.deepEqual(r.attempts.filter((a) => a.role === 'qa').map((a) => [a.provider, a.chain_index, a.error_code, a.fell_back]), [['codex', 0, 'RATE_LIMIT', true], ['claude', 1, 'UPSTREAM', false]]);
+    assert.equal(r.job.blocked_code, 'AUTH');
+    assert.deepEqual(r.invocations, ['swe:claude', ...times(3, 'qa:codex'), 'qa:claude']);
+    assert.deepEqual(r.attempts.filter((a) => a.role === 'qa').map((a) => [a.provider, a.chain_index, a.error_code, a.fell_back]), [['codex', 0, 'RATE_LIMIT', true], ['claude', 1, 'AUTH', false]]);
     assert.deepEqual(fallbackEvents(r.events), ['qa:codex->claude:RATE_LIMIT']);
     assert.ok(!r.invocations.includes('reviewer:cursor'), 'review never started');
   } finally { await r.scenario.cleanup(); }
+});
+
+test('(f) a QA chain limited at every provider pauses instead of blocking: visible in job, status and events, then cancellable', { timeout: 300_000 }, async () => {
+  const scenario = await createSyntheticScenario({ roleChains: { qa: { provider: 'codex', fallbacks: ['claude'] } }, providerBehavior: { codex: { qa: 'rate_limit' }, claude: { qa: 'upstream' } } });
+  const runtime = await createRuntime(scenario.runtimeOptions);
+  const app = await createController({ ...runtime, operatorToken: token });
+  try {
+    const queued = await app.inject({ method: 'POST', url: '/v1/jobs', headers: auth, payload: { issue_key: 'SAMPLE-123', dry_run: false } });
+    const id = (queued.json() as Job).job_id;
+    let job: Job & { resume_at?: string; paused_role?: string; pause_code?: string; base_sha?: string };
+    for (const deadline = Date.now() + 120_000; ; await new Promise((r) => setTimeout(r, 100))) {
+      job = (await app.inject({ method: 'GET', url: `/v1/jobs/${id}`, headers: auth })).json() as typeof job;
+      if (job.state === 'PAUSED' || terminal.has(job.state)) break;
+      assert.ok(Date.now() < deadline, `stuck in ${job.state}`);
+    }
+    assert.equal(job.state, 'PAUSED', JSON.stringify(job));
+    assert.equal(job.paused_role, 'qa'); assert.equal(job.pause_code, 'RATE_LIMIT'); assert.ok(job.resume_at && Date.parse(job.resume_at) > Date.now());
+    const status = (await app.inject({ method: 'GET', url: '/v1/status', headers: auth })).json() as { activity: { slots: { in_use: number }; paused_jobs: Array<{ job_id: string; role: string }> } };
+    assert.equal(status.activity.slots.in_use, 0); assert.deepEqual(status.activity.paused_jobs.map((p) => [p.job_id, p.role]), [[id, 'qa']]);
+    const events = ((await app.inject({ method: 'GET', url: `/v1/events?job_id=${id}&limit=500`, headers: auth })).json() as { events: Array<Event & { resume_at?: string }> }).events;
+    const paused = events.find((e) => e.type === 'job_paused'); assert.ok(paused?.resume_at); assert.equal(paused.code, 'RATE_LIMIT');
+    const cancelled = await app.inject({ method: 'POST', url: `/v1/jobs/${id}/cancel`, headers: auth });
+    assert.equal((cancelled.json() as Job).state, 'CANCELLED', cancelled.body);
+  } finally { await app.close(); await runtime.close(); await scenario.cleanup(); }
 });

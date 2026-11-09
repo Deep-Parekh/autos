@@ -95,6 +95,17 @@ export const configSchema = z.strictObject({
     /** Apply the retention policy automatically (at most hourly, between jobs). Manual `autos workspaces prune` always works. */
     auto_prune_workspaces: z.boolean().default(true),
     similar_tickets: z.strictObject({ enabled: z.boolean(), max_candidates: z.number().int().min(1).max(5) }),
+    /**
+     * When every provider of a role's chain is rate limited, the attempt pauses (no slot) and resumes at the earliest
+     * provider-reported reset time, otherwise after initial_minutes doubling per consecutive pause up to max_minutes.
+     * After max_total_hours of one pause streak the attempt is BLOCKED (RATE_LIMIT).
+     */
+    rate_limit_pause: z.strictObject({
+      initial_minutes: z.number().int().min(1).max(1440).default(15),
+      max_minutes: z.number().int().min(1).max(1440).default(240),
+      max_total_hours: z.number().int().min(1).max(168).default(24),
+    }).refine((p) => p.initial_minutes <= p.max_minutes, { message: 'initial_minutes must not exceed max_minutes', path: ['initial_minutes'] })
+      .default({ initial_minutes: 15, max_minutes: 240, max_total_hours: 24 }),
   }).refine((jobs) => (jobs.max_concurrent_checks ?? 1) <= jobs.max_parallel, { message: 'max_concurrent_checks must not exceed max_parallel', path: ['max_concurrent_checks'] }),
   build_profiles: z.record(identifierSchema, z.strictObject({ jdk: jdkVersionSchema.optional(), tomcat: tomcatVersionSchema.optional(), checks: z.array(checkCommandSchema).min(1) })),
   security: z.strictObject({ allow_jira_write: z.literal(false), allow_confluence_write: z.literal(false), allow_merge: z.literal(false), allow_deploy: z.literal(false), allow_prod_db: z.literal(false) }),

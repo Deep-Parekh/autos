@@ -10,7 +10,7 @@ import { minimatch } from 'minimatch';
 import {
   AutosError, HANDOFF_DIR, HANDOFF_FILE, HANDOFF_MAX_BYTES, INSTRUCTION_FILE_PATTERNS, branchNameSchema, digestSchema, gitShaSchema, issueKeySchema,
   projectMappingSchema, relativePathSchema, repositoryConfigSchema,
-  type GitCandidate, type GitCommitRequest, type GitCommitResult, type GitPrepareRequest,
+  type GitCandidate, type GitCommitRequest, type GitCommitResult, type GitPrepareRequest, type GitReopenRequest,
   type GitPushResult, type GitRunnerPort, type GitWorkspace, type RepositoryConfig, type RepositoryInstructionFile,
 } from '@autos/contracts';
 
@@ -29,6 +29,9 @@ const prepareSchema = z.strictObject({
   job_id: z.uuid(), issue_key: issueKeySchema, repository: repositoryConfigSchema,
   mapping: projectMappingSchema, workspaces_root: z.string().min(1),
   continue_from: continuationSchema.optional(),
+});
+const reopenSchema = z.strictObject({
+  workspace: workspaceSchema, mapping: projectMappingSchema, workspaces_root: z.string().min(1), seal: z.string().regex(/^[a-f0-9]{64}$/),
 });
 const commitSchema = z.strictObject({
   workspace: workspaceSchema, candidate_digest: digestSchema,
@@ -282,6 +285,51 @@ export class GitRunner implements GitRunnerPort {
       await rm(directory, { recursive: true, force: true }).catch(() => undefined);
       throw error;
     }
+  }
+
+  /** Opaque digest of everything verifyWorkspace() pins; stored by the workflow with a paused attempt. */
+  async sealWorkspace(workspace: GitWorkspace, signal?: AbortSignal): Promise<string> {
+    const record = await this.verifyWorkspace(workspace, signal);
+    return sealOf(record);
+  }
+
+  /**
+   * Re-adopts a workspace that this runner (or a previous controller process) prepared, for a paused attempt. Requires
+   * the seal taken at pause time: the directory, feature branch, start commit, remote, Git config and metadata digests
+   * must be unchanged. Nothing is fetched, merged or reset: the pinned base never moves.
+   */
+  async reopen(raw: GitReopenRequest, signal?: AbortSignal): Promise<GitWorkspace> {
+    const parsed = reopenSchema.safeParse(raw);
+    if (!parsed.success) throw new AutosError('INVALID_INPUT', 'Invalid Git reopen request');
+    const { mapping, workspaces_root, seal } = parsed.data; const supplied = parsed.data.workspace as GitWorkspace;
+    const { job_id, issue_key, repository, directory } = supplied;
+    this.assertAllowedRepository(repository);
+    if (!mapping.enabled || mapping.workspace !== repository.workspace || mapping.repository_slug !== repository.repository_slug || !issue_key.startsWith(`${mapping.project_key}-`)) throw new AutosError('FORBIDDEN', 'Project mapping does not authorize this repository and issue');
+    if (supplied.development_branch !== mapping.development_branch) throw new AutosError('MAPPING', 'Development branch mapping changed since the workspace was prepared');
+    if (supplied.feature_branch !== `deep/${issue_key}`) throw new AutosError('POLICY', 'Unexpected feature branch');
+    const existing = this.records.get(directory);
+    if (existing && sameWorkspace(existing.workspace, supplied)) {
+      if (sealOf(existing) !== seal) throw new AutosError('CONFLICT', 'Workspace changed while the attempt was paused');
+      return existing.workspace;
+    }
+    const root = await realpath(resolve(workspaces_root)).catch(() => null);
+    const real = await realpath(directory).catch(() => null);
+    const info = await lstat(directory).catch(() => null);
+    if (!root || !real || !info || info.isSymbolicLink() || !info.isDirectory() || real !== directory || dirname(real) !== root || !basename(real).startsWith(`${job_id}-`)) throw new AutosError('CONFLICT', 'Paused workspace is missing or was moved');
+    let remote = this.resolveRemote(repository.remote_url, repositoryId(repository));
+    if (this.testRemotes.has(repositoryId(repository))) remote = (await realpath(remote).catch(() => null)) ?? remote;
+    const startSha = startOf(supplied);
+    const gitDir = await this.gitDir(directory, signal);
+    const configDigest = await this.gitConfigDigest(directory);
+    const metadata = await this.metadataDigests(directory);
+    const stableRepository = Object.freeze({ ...repository, protected_branches: Object.freeze([...repository.protected_branches]), allowed_paths: Object.freeze([...repository.allowed_paths]), prohibited_paths: Object.freeze([...repository.prohibited_paths]) }) as RepositoryConfig;
+    const workspace: RunnerWorkspace = Object.freeze({ job_id, issue_key, repository: stableRepository, directory, base_sha: supplied.base_sha, development_branch: supplied.development_branch, feature_branch: supplied.feature_branch, start_sha: startSha });
+    const record: WorkspaceRecord = { workspace, startSha, workspaceRoot: root, gitDir, configDigest, ...metadata, remote };
+    if (sealOf(record) !== seal) throw new AutosError('CONFLICT', 'Workspace changed while the attempt was paused');
+    this.records.set(directory, record);
+    try { await this.verifyWorkspace(workspace, signal); }
+    catch (error) { this.records.delete(directory); throw error instanceof AutosError && error.code !== 'CANCELLED' ? new AutosError('CONFLICT', 'Paused workspace no longer matches its pinned state') : error; }
+    return workspace;
   }
 
   async inspectCandidate(workspace: GitWorkspace, signal?: AbortSignal): Promise<GitCandidate> {
@@ -853,6 +901,12 @@ function repositoryId(repository: Pick<RepositoryConfig, 'workspace' | 'reposito
 
 function startOf(workspace: GitWorkspace): string {
   return (workspace as RunnerWorkspace).start_sha ?? workspace.base_sha;
+}
+
+/** Seal over the trusted state of a prepared workspace (see GitRunner.reopen). */
+function sealOf(record: WorkspaceRecord): string {
+  return createHash('sha256').update(JSON.stringify(['autos-workspace-seal-v1', record.workspace.job_id, record.workspace.issue_key, repositoryId(record.workspace.repository), record.workspace.directory,
+    record.workspace.base_sha, record.startSha, record.workspace.development_branch, record.workspace.feature_branch, record.gitDir, record.configDigest, record.indexDigest, record.infoDigest, record.remote, record.committedSha ?? null])).digest('hex');
 }
 
 function sameWorkspace(expected: GitWorkspace, supplied: GitWorkspace): boolean {

@@ -29,6 +29,8 @@ export interface CliAdapterOptions {
   maxTranscriptBytes?: number;
   killGraceMs?: number;
   spawnProcess?: typeof spawn;
+  /** Clock for rate-limit reset windows and relative retry fields; defaults to `() => new Date()`. */
+  now?: () => Date;
 }
 
 type Invocation = { binary: string; args: string[]; stdin?: string };
@@ -507,7 +509,86 @@ function classifyExit(provider: Provider, stdout: string, stderr: string): Error
   return fromStructured !== 'TOOL' ? fromStructured : classifyText(stderr.slice(0, 8000));
 }
 
-const UNAVAILABLE_SPAWN_CODES = new Set(['ENOENT', 'EACCES', 'ENOTDIR', 'ENOEXEC', 'EISDIR', 'EPERM']);
+/**
+ * Provider limit reset time, read ONLY from trusted structured fields of structured stdout events. Assistant
+ * messages, agent_message/reasoning items, tool results and stderr are never inspected. Supported:
+ * - claude/cursor stream-json: `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":..}}`
+ *   (also `resets_at`; any other status is ignored), plus `type:"result"` envelopes and `type:"error"` events.
+ * - codex exec --json: `type` `error`, `turn.failed` or `turn.error` events.
+ * For result/error events the event itself, its `error` object and `error.error` are checked for absolute fields
+ * `resetsAt` / `resets_at` (epoch seconds, epoch milliseconds when > 1e12, numeric strings, or Date-parseable
+ * strings) and relative-seconds fields `resets_in_seconds` / `retry_after_seconds` / `retry_after` (a non-numeric
+ * `retry_after` string is read as an HTTP date). Only values within (now, now + 7 days] count; the earliest wins.
+ */
+const RESET_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const RESET_LINE_HINT = /resets|retry_after/i;
+const ABSOLUTE_RESET_FIELDS = ['resetsAt', 'resets_at'] as const;
+const RELATIVE_RESET_FIELDS = ['resets_in_seconds', 'retry_after_seconds', 'retry_after'] as const;
+
+function absoluteResetMs(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) return undefined;
+    return value > 1e12 ? value : value * 1000;
+  }
+  if (typeof value !== 'string' || value.length === 0 || value.length > 64) return undefined;
+  if (/^\d+(?:\.\d+)?$/.test(value)) return absoluteResetMs(Number(value));
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function relativeResetMs(value: unknown, nowMs: number): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? nowMs + value * 1000 : undefined;
+  if (typeof value !== 'string' || value.length === 0 || value.length > 64) return undefined;
+  if (/^\d+(?:\.\d+)?$/.test(value)) return relativeResetMs(Number(value), nowMs);
+  return undefined;
+}
+
+function resetCandidates(source: Record<string, unknown> | undefined, nowMs: number, allowRetryAfterDate: boolean): number[] {
+  if (!source) return [];
+  const found: number[] = [];
+  for (const key of ABSOLUTE_RESET_FIELDS) {
+    const value = absoluteResetMs(source[key]);
+    if (value !== undefined) found.push(value);
+  }
+  for (const key of RELATIVE_RESET_FIELDS) {
+    const raw = source[key];
+    const value = relativeResetMs(raw, nowMs) ?? (allowRetryAfterDate && key === 'retry_after' && typeof raw === 'string' && raw.length <= 64 && !/^\d/.test(raw) ? absoluteResetMs(raw) : undefined);
+    if (value !== undefined) found.push(value);
+  }
+  return found;
+}
+
+function errorEventCandidates(event: Record<string, unknown>, nowMs: number): number[] {
+  const nested = object(event.error);
+  return [...resetCandidates(event, nowMs, true), ...resetCandidates(nested, nowMs, true), ...resetCandidates(object(nested?.error), nowMs, true)];
+}
+
+export function extractRateLimitReset(provider: Provider, stdout: string, now: Date): string | undefined {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) return undefined;
+  let earliest: number | undefined;
+  for (const raw of stdout.split('\n')) {
+    const line = raw.trim();
+    if (!line.startsWith('{') || !RESET_LINE_HINT.test(line)) continue;
+    const event = object(parseJson(line));
+    if (!event || typeof event.type !== 'string') continue;
+    let candidates: number[] = [];
+    if (provider === 'codex') {
+      if (event.type === 'error' || event.type === 'turn.failed' || event.type === 'turn.error') candidates = errorEventCandidates(event, nowMs);
+    } else if (event.type === 'rate_limit_event') {
+      const info = object(event.rate_limit_info);
+      if (info?.status === 'rejected') candidates = ABSOLUTE_RESET_FIELDS.map((key) => absoluteResetMs(info[key])).filter((value): value is number => value !== undefined);
+    } else if (event.type === 'result' || event.type === 'error') {
+      candidates = errorEventCandidates(event, nowMs);
+    }
+    for (const candidate of candidates) {
+      if (candidate > nowMs && candidate <= nowMs + RESET_WINDOW_MS && (earliest === undefined || candidate < earliest)) earliest = candidate;
+    }
+  }
+  return earliest === undefined ? undefined : new Date(earliest).toISOString();
+}
+
+const UNAVAILABLE_SPAWN_CODES =new Set(['ENOENT', 'EACCES', 'ENOTDIR', 'ENOEXEC', 'EISDIR', 'EPERM']);
 
 function resultRecord(request: ProviderRequest, result: Omit<ProviderResult, 'provider' | 'role' | 'transcript_path' | 'model'>): ProviderResult {
   const { error_code, ...rest } = result;
@@ -556,6 +637,7 @@ function validateOptions(options: CliAdapterOptions): void {
   if (options.sweBashPrefixes && (options.sweBashPrefixes.length === 0 || !options.sweBashPrefixes.every((prefix) => BASH_PREFIX_PATTERN.test(prefix)))) {
     throw new AutosError('INVALID_CONFIG', 'SWE Bash prefixes must be non-empty command prefixes without shell metacharacters');
   }
+  if (options.now !== undefined && typeof options.now !== 'function') throw new AutosError('INVALID_CONFIG', 'Provider adapter clock must be a function');
   const positive = [options.maxOutputBytes, options.maxTranscriptBytes, options.maxPromptBytes, options.killGraceMs]
     .filter((value): value is number => value !== undefined);
   if (positive.some((value) => !Number.isSafeInteger(value) || value <= 0)) throw new AutosError('INVALID_CONFIG', 'Provider adapter limits must be positive integers');
@@ -613,14 +695,24 @@ export class CliProviderAdapter implements ProviderAdapterPort {
     if (processResult.outputLimit) return await this.finish(request, start, { status: 'FAILED', exit_code: processResult.code, elapsed_ms: elapsed, result: null, error_code: 'TOOL' }, '[provider output limit exceeded]');
     if (processResult.code !== 0) {
       const code = classifyExit(this.provider, processResult.stdout, processResult.stderr);
-      return await this.finish(request, start, { status: 'FAILED', exit_code: processResult.code, elapsed_ms: elapsed, result: null, error_code: code }, transcript);
+      return await this.finish(request, start, { status: 'FAILED', exit_code: processResult.code, elapsed_ms: elapsed, result: null, error_code: code, ...this.retryAt(code, processResult.stdout) }, transcript);
     }
     const parsed = parseProviderOutput(this.provider, processResult.stdout);
     if (!parsed.ok) {
       const code = parsed.kind === 'tool' ? parsed.code ?? 'TOOL' : 'INVALID_OUTPUT';
-      return await this.finish(request, start, { status: 'FAILED', exit_code: 0, elapsed_ms: elapsed, result: null, error_code: code }, transcript);
+      return await this.finish(request, start, { status: 'FAILED', exit_code: 0, elapsed_ms: elapsed, result: null, error_code: code, ...this.retryAt(code, processResult.stdout) }, transcript);
     }
     return await this.finish(request, start, { status: 'SUCCEEDED', exit_code: 0, elapsed_ms: elapsed, result: redactValue(parsed.result, redact) }, transcript);
+  }
+
+  /** RATE_LIMIT only: provider-reported reset time from structured stdout events; never raw output. */
+  private retryAt(code: ErrorCode, stdout: string): { retry_at?: string } {
+    if (code !== 'RATE_LIMIT') return {};
+    let now: Date;
+    try { now = (this.options.now ?? (() => new Date()))(); } catch { return {}; }
+    if (!(now instanceof Date)) return {};
+    const retryAt = extractRateLimitReset(this.provider, stdout, now);
+    return retryAt === undefined ? {} : { retry_at: retryAt };
   }
 
   private async finish(request: ProviderRequest, started: number, fields: Omit<ProviderResult, 'provider' | 'role' | 'transcript_path' | 'model'>, transcript: string): Promise<ProviderResult> {

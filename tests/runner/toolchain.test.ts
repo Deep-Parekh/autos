@@ -99,7 +99,7 @@ test('listInstalledToolchains reports only valid, sorted, real toolchains', asyn
   } finally { await rm(paths.root, { recursive: true, force: true }); }
 });
 
-test('runRole with a toolchain mounts it read-only with scratch, env and offline Maven args, then removes scratch', async () => {
+test('runRole with a toolchain mounts it read-only with scratch, env and offline Maven args, keeping the SWE job scratch', async () => {
   const paths = await fixture();
   try {
     const executor = new Fake();
@@ -116,8 +116,9 @@ test('runRole with a toolchain mounts it read-only with scratch, env and offline
     assert.ok(env.includes(`MAVEN_ARGS=-o -Dmaven.repo.local=${TOOLCHAIN_MOUNTS.mavenLocal} -Dmaven.repo.local.tail=${TOOLCHAIN_MOUNTS.mavenCache} -Dmaven.repo.local.tail.ignoreAvailability=true`));
     assert.ok(env.some((entry) => entry.startsWith(`PATH=${TOOLCHAIN_MOUNTS.jdk}/bin:/opt/maven/bin:/usr/local/`)));
     assert.equal(executor.scratchSeen?.mode, 0o700);
-    assert.deepEqual(await readdir(join(paths.outputRoot, '.scratch')), []);
-    assert.equal(await stat(executor.scratchSeen!.path).then(() => true, () => false), false);
+    // SWE keeps its per-job scratch for later invocations of the same job (see swe-scratch.test.ts).
+    assert.equal(executor.scratchSeen?.path, join(paths.outputRoot, '.scratch', `swe-${jobId}`));
+    assert.deepEqual(await readdir(join(paths.outputRoot, '.scratch')), [`swe-${jobId}`]);
 
     // No cache, no Tomcat: no tail, no CATALINA_*.
     const bare = new Fake();

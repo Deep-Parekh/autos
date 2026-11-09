@@ -140,6 +140,12 @@ node apps/cli/bin/autos.mjs --config config/config.yaml controller start
 curl -s -H "Authorization: Bearer $AUTOS_OPERATOR_TOKEN" http://127.0.0.1:8787/v1/queue
 ```
 
+## Unattended runs: limits, pauses and build state
+
+When a provider hits its session or usage limit, the next provider in the role's chain continues in the same workspace. When every provider of the role is limited, the job is `PAUSED` instead of blocked: it keeps its workspace, pinned base, branch and repair round, frees its slot, and resumes by itself at the earliest reset time the CLIs report (otherwise after 15, 30, 60, … minutes, capped at 4 h), restarting at the role's primary provider. After 24 h of consecutive pauses it is blocked with `RATE_LIMIT`. Tune it with `jobs.rate_limit_pause` (see [cli.md](cli.md#rate-limit-pauses)). Autos never pulls newer development-branch commits into a paused or resumed job; you resolve conflicts with `develop` when you merge. Keep the controller running (`controller start`) so paused jobs resume; `autos status` lists them and `autos jobs cancel JOB_ID` stops one.
+
+Within one job, SWE containers reuse the same `/scratch`, so a fallback, repair round or resume does not recompile and repopulate `/scratch/m2` from zero. QA and the reviewer get their own empty scratch every time. The SWE scratch lives under `artifacts/.scratch/swe-<jobId>` and is deleted when the job ends, is cancelled or pruned, and when the supervisor starts.
+
 ## Scaling to several tickets on a larger host
 
 The pilot processes one ticket at a time (`jobs.max_parallel: 1`). On a larger machine, raise it in `config/config.yaml` and restart the controller; no code change is needed:
@@ -164,6 +170,8 @@ Each ticket still gets its own workspace, branch and short-lived containers, so 
 | Smoke test `FAIL (TOOL)` with network errors | `AUTOS_PROVIDER_NETWORK` unset, or the network does not exist |
 | Checks fail on dependency resolution | The offline Maven cache is incomplete (step 5) |
 | `MAPPING`: required toolchain not installed | Install it with `scripts/install-toolchains.ts` (the JDK major or exact Tomcat version on the branch-map row) and restart the supervisor |
+| Job shows `PAUSED` | Every provider of a role is rate limited; it resumes at `resume_at` (`autos status`). Cancel with `autos jobs cancel JOB_ID` |
+| `CONFLICT`: workspace changed while paused | The paused workspace's Git metadata or location changed (or the ticket changed); retry the job to start a fresh attempt |
 | Supervisor "Dependency cache" error | The cache must not be inside the auth, workspace or artifact folders |
 
 ## Known gaps
