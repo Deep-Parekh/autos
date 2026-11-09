@@ -18,7 +18,7 @@ const SEAL = 'e'.repeat(64);
 type Fail = { code: string; times?: number; edit?: boolean; retryAt?: string; write?: string; transcript?: string };
 interface World {
   now: number; digest: number; description: string;
-  fails: Map<string, Fail[]>; requests: Array<{ provider: string; role: string; prompt: string }>;
+  fails: Map<string, Fail[]>; requests: Array<{ provider: string; role: string; prompt: string; issue?: string }>;
   prepares: number; reopens: Array<{ seal: string; directory: string }>; checks: number; released: string[]; handoff: string | null; seal: string; resolveBaseCalls: number;
 }
 const world = (): World => ({ now: T0, digest: 1, description: 'Description', fails: new Map(), requests: [], prepares: 0, reopens: [], checks: 0, released: [], handoff: null, seal: SEAL, resolveBaseCalls: 0 });
@@ -31,7 +31,7 @@ function deps(w: World, store: SqliteJobStore, artifacts: FileArtifactStore): Wo
     config, jobs: store, artifacts, clock: { now: () => new Date(w.now) },
     atlassian: {
       async getSavedFilter() { return { id: '12345', name: 'Synthetic', jql: 'project = SAMPLE' }; },
-      async listIssueKeys() { return ['SAMPLE-1']; },
+      async listIssueKeys() { return ['SAMPLE-1', 'SAMPLE-2', 'SAMPLE-3']; },
       async listIssues() { return [issue('SAMPLE-1')]; },
       async getIssue(key: string) { return issue(key); },
       async getBranchMap() { return [mapping]; },
@@ -59,7 +59,7 @@ function deps(w: World, store: SqliteJobStore, artifacts: FileArtifactStore): Wo
     },
     runner: {
       async runRole(req) {
-        w.requests.push({ provider: req.provider, role: req.role, prompt: await readFile(req.prompt_path, 'utf8') });
+        w.requests.push({ provider: req.provider, role: req.role, prompt: await readFile(req.prompt_path, 'utf8'), issue: req.issue_key });
         const key = `${req.provider}:${req.role}`;
         const base = { provider: req.provider, role: req.role, status: 'SUCCEEDED' as const, exit_code: 0, elapsed_ms: 1, transcript_path: req.transcript_path };
         const fails = w.fails.get(key); const next = fails?.[0];
@@ -284,5 +284,71 @@ describe('richer SWE handoff', () => {
     assert.ok(Buffer.byteLength(text) <= 42 * 1024, `handoff is ${Buffer.byteLength(text)} bytes`);
     assert.ok(!text.includes('<<<OPERATOR NOTE'), 'forged operator markers are neutralized');
     assert.match(text, /hunks truncated for prompt budget|diff truncated/);
+  });
+});
+
+describe('queue order and provider limit gate', () => {
+  const limitQa = (w: World) => { failWith(w, 'codex:qa', { code: 'RATE_LIMIT', times: 3 }); failWith(w, 'claude:qa', { code: 'RATE_LIMIT', times: 3 }); };
+  const firstIssueAfter = (w: World, from: number) => w.requests.slice(from)[0]?.issue;
+
+  for (const order of ['older', 'newer'] as const) {
+    it(`a due paused job ${order} than a queued job runs first`, async () => {
+      const w = world(); limitQa(w);
+      const { store, service } = open(w);
+      const queuedBefore = order === 'newer' ? await service.submit('SAMPLE-2', false) : undefined;
+      const paused = await service.execute((await service.submit('SAMPLE-1', false)).job_id);
+      assert.equal(paused.state, 'PAUSED');
+      const queued = queuedBefore ?? await service.submit('SAMPLE-2', false);
+      w.now = T0 + minutes(15); const from = w.requests.length; await service.drain();
+      assert.equal(firstIssueAfter(w, from), 'SAMPLE-1', 'the paused attempt resumes before any queued ticket starts');
+      assert.equal((await service.get(paused.job_id))!.state, 'READY_FOR_HUMAN'); assert.equal((await service.get(queued.job_id))!.state, 'READY_FOR_HUMAN');
+      store.close();
+    });
+  }
+
+  it('holds new queued tickets while every SWE provider is limited (no workspace, no baseline), lifts at the reset time and survives a restart', async () => {
+    const w = world(); limitQa(w);
+    let { store, service } = open(w);
+    const paused = await service.execute((await service.submit('SAMPLE-1', false)).job_id);
+    const gate = (await service.activity()).provider_limits;
+    assert.equal(gate.gate_active, true); assert.equal(gate.gate_until, iso(T0 + minutes(15)));
+    assert.deepEqual(gate.providers.map((l) => l.provider).sort(), ['claude', 'codex']);
+    const opened = (await service.events({ limit: 500 })).filter((e) => e.type === 'provider_gate_opened');
+    assert.equal(opened.length, 1); assert.equal(opened[0]!.resume_at, iso(T0 + minutes(15)));
+    const waiting = await service.submit('SAMPLE-2', false);
+    assert.equal(waiting.state, 'QUEUED', 'submissions queue behind the gate instead of failing');
+    w.now = T0 + minutes(5); await service.drain();
+    assert.equal((await service.get(waiting.job_id))!.state, 'QUEUED'); assert.equal(w.prepares, 1, 'no workspace was created for the gated ticket'); const checks = w.checks;
+    store.close();
+
+    ({ store, service } = open(w)); // controller restart: the gate is durable
+    w.now = T0 + minutes(10); await service.drain();
+    assert.equal((await service.get(waiting.job_id))!.state, 'QUEUED'); assert.equal((await service.activity()).provider_limits.gate_active, true); assert.equal(w.checks, checks, 'no baseline checks either');
+
+    w.now = T0 + minutes(15); await service.drain();
+    assert.equal((await service.activity()).provider_limits.gate_active, false);
+    assert.equal((await service.get(paused.job_id))!.state, 'READY_FOR_HUMAN'); assert.equal((await service.get(waiting.job_id))!.state, 'READY_FOR_HUMAN');
+    assert.ok((await service.events({ limit: 500 })).some((e) => e.type === 'provider_gate_closed'));
+    store.close();
+  });
+
+  it('lifts early when a run on a gated provider succeeds; dry runs are never gated', async () => {
+    const w = world();
+    const { store, service } = open(w);
+    store.recordProviderLimits(['claude', 'codex'], iso(T0 + minutes(120)), iso(T0), null);
+    const dry = await service.submit('SAMPLE-3', true);
+    const gated = await service.submit('SAMPLE-1', false);
+    await service.drain();
+    assert.equal((await service.get(dry.job_id))!.state, 'PLANNED', 'a dry run starts no agent and is not gated');
+    assert.equal((await service.get(gated.job_id))!.state, 'QUEUED');
+    // An explicit execution of another ticket succeeds on claude: its limit clears and the gate lifts.
+    const direct = await service.execute((await service.submit('SAMPLE-2', false)).job_id);
+    assert.equal(direct.state, 'READY_FOR_HUMAN');
+    const gate = (await service.activity()).provider_limits;
+    assert.equal(gate.gate_active, false); assert.deepEqual(gate.providers, [], 'SWE (claude) and QA (codex) succeeded, clearing both limits');
+    assert.ok((await service.events({ limit: 500 })).some((e) => e.type === 'provider_gate_closed'));
+    await service.drain();
+    assert.equal((await service.get(gated.job_id))!.state, 'READY_FOR_HUMAN');
+    store.close();
   });
 });

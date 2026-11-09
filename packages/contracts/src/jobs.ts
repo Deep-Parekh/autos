@@ -44,7 +44,7 @@ export const JOB_EVENT_TYPES = [
   'role_started', 'role_finished', 'checks_started', 'checks_finished',
   'repair_round_started', 'commit_created', 'push_finished', 'job_finished',
   'poll_started', 'poll_finished', 'poll_failed', 'recovered', 'revision_requested', 'provider_fallback',
-  'issue_closed', 'workspaces_pruned', 'job_paused', 'job_resumed',
+  'issue_closed', 'workspaces_pruned', 'job_paused', 'job_resumed', 'provider_gate_opened', 'provider_gate_closed',
 ] as const;
 export const jobEventTypeSchema = z.enum(JOB_EVENT_TYPES);
 export const WORKFLOW_STAGES = ['intake', 'routing', 'baseline', 'implementation', 'checks', 'qa', 'review', 'repair', 'finalize', 'push'] as const;
@@ -73,7 +73,7 @@ export const jobEventSchema = z.strictObject({
   count: z.number().int().min(0).optional(),
   /** Human-readable, sanitized, at most 300 characters. */
   message: z.string().max(300).optional(),
-  /** job_paused only: when the attempt is due to resume. */
+  /** job_paused: when the attempt is due to resume; provider_gate_opened: when the gate lifts at the latest. */
   resume_at: timestampSchema.optional(),
 });
 export type JobEvent = z.infer<typeof jobEventSchema>;
@@ -105,6 +105,16 @@ export const workflowActivitySchema = z.strictObject({
   active_jobs: z.array(activeJobSchema),
   /** PAUSED attempts (no slot), earliest resume first. */
   paused_jobs: z.array(pausedJobSchema),
+  /**
+   * Known provider limits (recorded when a whole role chain was limited) and the new-ticket gate: while every provider of
+   * the SWE chain is limited, no new QUEUED (non-dry-run) ticket starts; due PAUSED attempts still resume.
+   */
+  provider_limits: z.strictObject({
+    providers: z.array(z.strictObject({ provider: providerSchema, until: timestampSchema })),
+    gate_active: z.boolean(),
+    /** Earliest time a SWE-chain provider's limit expires (when the gate lifts at the latest); null when inactive. */
+    gate_until: timestampSchema.nullable(),
+  }),
   /** Configured slot limits. */
   slots: z.strictObject({ max_parallel: z.number().int().min(1), in_use: z.number().int().min(0), max_concurrent_checks: z.number().int().min(1), checks_in_use: z.number().int().min(0) }),
   polling: z.strictObject({

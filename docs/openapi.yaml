@@ -7772,6 +7772,40 @@ paths:
                             - resume_at
                             - paused_since
                             - pause_count
+                      provider_limits:
+                        type: object
+                        additionalProperties: false
+                        description: "Known provider limits and the new-ticket gate: while every SWE-chain provider is limited, new QUEUED tickets wait (due PAUSED attempts still resume)."
+                        properties:
+                          providers:
+                            type: array
+                            items:
+                              type: object
+                              additionalProperties: false
+                              properties:
+                                provider:
+                                  type: string
+                                  enum:
+                                    - claude
+                                    - codex
+                                    - cursor
+                                until:
+                                  type: string
+                                  format: date-time
+                              required:
+                                - provider
+                                - until
+                          gate_active:
+                            type: boolean
+                          gate_until:
+                            type:
+                              - string
+                              - "null"
+                            format: date-time
+                        required:
+                          - providers
+                          - gate_active
+                          - gate_until
                       slots:
                         type: object
                         additionalProperties: false
@@ -7845,6 +7879,7 @@ paths:
                       - active
                       - active_jobs
                       - paused_jobs
+                      - provider_limits
                       - slots
                       - polling
                       - counts
@@ -7969,6 +8004,10 @@ paths:
                   active: null
                   active_jobs: []
                   paused_jobs: []
+                  provider_limits:
+                    providers: []
+                    gate_active: false
+                    gate_until: null
                   slots:
                     max_parallel: 1
                     in_use: 0
@@ -8255,6 +8294,8 @@ paths:
                             - workspaces_pruned
                             - job_paused
                             - job_resumed
+                            - provider_gate_opened
+                            - provider_gate_closed
                         job_id:
                           type:
                             - string
@@ -8352,7 +8393,7 @@ paths:
                         resume_at:
                           type: string
                           format: date-time
-                          description: "job_paused only: when the attempt is due to resume."
+                          description: "job_paused: when the attempt is due to resume; provider_gate_opened: when the new-ticket gate lifts at the latest."
                       required:
                         - event_id
                         - at
@@ -8639,6 +8680,8 @@ paths:
                             - workspaces_pruned
                             - job_paused
                             - job_resumed
+                            - provider_gate_opened
+                            - provider_gate_closed
                         job_id:
                           type:
                             - string
@@ -8736,7 +8779,7 @@ paths:
                         resume_at:
                           type: string
                           format: date-time
-                          description: "job_paused only: when the attempt is due to resume."
+                          description: "job_paused: when the attempt is due to resume; provider_gate_opened: when the new-ticket gate lifts at the latest."
                       required:
                         - event_id
                         - at

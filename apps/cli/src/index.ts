@@ -340,6 +340,9 @@ export function formatEvent(event: JobEvent): string {
   if (event.type === 'job_resumed') {
     return [event.at.slice(11, 19), event.issue_key ?? 'service', `resumed${event.role ? ` ${event.role}` : ''} at its primary provider`, ...(event.code ? [`after ${event.code}`] : []), ...(event.repair_round !== undefined ? [`(round ${event.repair_round})`] : [])].join(' ');
   }
+  if (event.type === 'provider_gate_opened' || event.type === 'provider_gate_closed') {
+    return [event.at.slice(11, 19), 'service', event.type === 'provider_gate_opened' ? `provider limit gate opened: new tickets wait${event.resume_at ? ` until ${event.resume_at.slice(0, 16).replace('T', ' ')}Z` : ''}` : 'provider limit gate lifted: new tickets may start'].join(' ');
+  }
   if (event.type === 'issue_closed') {
     return [event.at.slice(11, 19), event.issue_key ?? 'service', `issue closed${event.outcome ? ` as ${event.outcome.toLowerCase()}` : ''}`, ...(event.count !== undefined ? [`workspaces removed=${event.count}`] : []), ...(event.code ? [`code=${event.code}`] : [])].join(' ');
   }
@@ -386,6 +389,8 @@ export function formatStatus(status: StatusResponse, now = Date.now()): string {
       lines.push(`Active: ${active.issue_key} ${active.state}${active.stage ? ` stage=${active.stage}` : ''}${who} round ${active.repair_round}${active.dry_run ? ' (dry run)' : ''}${elapsed ? `  elapsed ${elapsed}` : ''}`);
     }
   } else lines.push('Active: idle (no job running)');
+  const limits = activity.provider_limits;
+  if (limits?.providers.length) lines.push(`Provider limits: ${limits.providers.map((l) => `${l.provider} until ${l.until}`).join(', ')}${limits.gate_active ? `; new tickets wait until ${limits.gate_until ?? 'a limit resets'}` : '; new tickets still start (an SWE provider is available)'}`);
   for (const paused of activity.paused_jobs ?? []) {
     const due = paused.resume_at ? Date.parse(paused.resume_at) : NaN;
     lines.push(`Paused: ${paused.issue_key}${paused.role ? ` ${paused.role}` : ''}${paused.code ? ` ${paused.code}` : ''} round ${paused.repair_round} pause ${paused.pause_count}  resumes ${paused.resume_at ?? 'unknown'}${Number.isFinite(due) ? ` (in ${formatDuration((due - now) / 1000)})` : ''}  (no slot held)`);

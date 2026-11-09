@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { resolveToolchain, missingToolchains, installedToolchainsSchema, type ToolchainSelection, closeIssueRequestSchema, providerCallSchema, datasetRecordSchema, datasetExportOptionsSchema, type ProviderCall, type DatasetRecord, type DatasetExportOptions, type AutosConfig, closeIssueResultSchema, issueClosureSchema, pruneWorkspacesRequestSchema, pruneWorkspacesResultSchema, workspaceEntrySchema, WORKSPACE_DIR_NAME_PATTERN, type IssueClosure, type IssueResolution, type CloseIssueRequest, type CloseIssueResult, type PruneWorkspacesRequest, type PruneWorkspacesResult, type WorkspaceEntry, artifactManifestSchema, AutosError, FALLBACK_ERROR_CODES, HANDOFF_ERROR_CODES, INSTRUCTION_FILE_BASENAMES, INSTRUCTION_FILE_PATTERNS, HANDOFF_DIR, type RepositoryConfig, type RepositoryInstructionFile, providerAttemptSchema, type ProviderAttempt, operatorNoteRequestSchema, operatorNoteSchema, ticketNoteSchema, ticketNotesSummarySchema, MAX_TICKET_NOTES, type TicketNote, type TicketNotesSummary, type OperatorNote, type OperatorNoteRequest, jobEventSchema, workflowActivitySchema, canTransition, checksSchema, evaluateFinalization, issueKeySchema, jobIdSchema, jobRecordSchema, jobStateSchema, relativePathSchema, roleSchema, timestampSchema, type ArtifactManifest, type JobRecord, type JobState, type WorkflowDependencies, type WorkflowServicePort, type GitWorkspace, type ProviderResult, type Checks, type QaResult, type ReviewResult, type JobEvent, type NewJobEvent, type WorkflowActivity, type WorkflowStage, PAUSE_ERROR_CODES, pauseCheckpointSchema, summarizeTranscriptActions, type PauseCheckpoint, type TranscriptAction, type AgentRole, type ErrorCode } from '@autos/contracts';
+import { resolveToolchain, missingToolchains, installedToolchainsSchema, type ToolchainSelection, closeIssueRequestSchema, providerCallSchema, datasetRecordSchema, datasetExportOptionsSchema, type ProviderCall, type DatasetRecord, type DatasetExportOptions, type AutosConfig, closeIssueResultSchema, issueClosureSchema, pruneWorkspacesRequestSchema, pruneWorkspacesResultSchema, workspaceEntrySchema, WORKSPACE_DIR_NAME_PATTERN, type IssueClosure, type IssueResolution, type CloseIssueRequest, type CloseIssueResult, type PruneWorkspacesRequest, type PruneWorkspacesResult, type WorkspaceEntry, artifactManifestSchema, AutosError, FALLBACK_ERROR_CODES, HANDOFF_ERROR_CODES, INSTRUCTION_FILE_BASENAMES, INSTRUCTION_FILE_PATTERNS, HANDOFF_DIR, type RepositoryConfig, type RepositoryInstructionFile, providerAttemptSchema, type ProviderAttempt, operatorNoteRequestSchema, operatorNoteSchema, ticketNoteSchema, ticketNotesSummarySchema, MAX_TICKET_NOTES, type TicketNote, type TicketNotesSummary, type OperatorNote, type OperatorNoteRequest, jobEventSchema, workflowActivitySchema, canTransition, checksSchema, evaluateFinalization, issueKeySchema, jobIdSchema, jobRecordSchema, jobStateSchema, relativePathSchema, roleSchema, timestampSchema, type ArtifactManifest, type JobRecord, type JobState, type WorkflowDependencies, type WorkflowServicePort, type GitWorkspace, type ProviderResult, type Checks, type QaResult, type ReviewResult, type JobEvent, type NewJobEvent, type WorkflowActivity, type WorkflowStage, providerSchema, PAUSE_ERROR_CODES, pauseCheckpointSchema, summarizeTranscriptActions, type PauseCheckpoint, type TranscriptAction, type AgentRole, type ErrorCode } from '@autos/contracts';
 
 /** JobRecord plus the revision fields (the exported interface may lag the Zod schema). */
 type Job = JobRecord & { parent_job_id?: string; revision?: number };
@@ -123,6 +123,9 @@ export class SqliteJobStore {
     addColumn('resume_at', 'TEXT', 'job_events');
     this.db.exec(`CREATE TABLE IF NOT EXISTS job_checkpoints (job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE, checkpoint TEXT NOT NULL, saved_at TEXT NOT NULL);
       INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(8, '${nowIso()}')`);
+    // Provider limit gate: providers known to be limited (from a fully limited role chain) and until when.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS provider_limits (provider TEXT PRIMARY KEY, limited_until TEXT NOT NULL, recorded_at TEXT NOT NULL, job_id TEXT);
+      INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(9, '${nowIso()}')`);
   }
   private tx<T>(fn: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const value = fn(); this.db.exec('COMMIT'); return value; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
   async create(job: Job): Promise<void> {
@@ -334,11 +337,14 @@ export class SqliteJobStore {
       : this.db.prepare("SELECT jobs.*, (SELECT resolution FROM issue_closures WHERE issue_closures.issue_key=jobs.issue_key) AS closed_as FROM jobs WHERE state='QUEUED' AND (not_before IS NULL OR not_before<=?) ORDER BY created_at,rowid LIMIT ?").all(timestampSchema.parse(at), limit);
     return rows.map((row) => fromRow(row as Record<string, unknown>));
   }
-  /** Oldest-first jobs that may start now: QUEUED past their backoff, and PAUSED attempts whose resume time has come. */
+  /**
+   * Jobs that may start now: due PAUSED attempts first (they already hold a workspace and partial work), then QUEUED jobs
+   * past their backoff; age (created_at, rowid) orders each group.
+   */
   async listDue(limit: number, at: string): Promise<Job[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) throw new AutosError('INVALID_INPUT', 'Invalid queue batch size');
     const t = timestampSchema.parse(at);
-    return (this.db.prepare(`${JOB_SELECT} WHERE (state='QUEUED' AND (not_before IS NULL OR not_before<=?)) OR (state='PAUSED' AND resume_at IS NOT NULL AND resume_at<=?) ORDER BY created_at,rowid LIMIT ?`).all(t, t, limit) as Array<Record<string, unknown>>).map(fromRow);
+    return (this.db.prepare(`${JOB_SELECT} WHERE (state='QUEUED' AND (not_before IS NULL OR not_before<=?)) OR (state='PAUSED' AND resume_at IS NOT NULL AND resume_at<=?) ORDER BY CASE state WHEN 'PAUSED' THEN 0 ELSE 1 END, created_at, rowid LIMIT ?`).all(t, t, limit) as Array<Record<string, unknown>>).map(fromRow);
   }
   /**
    * Pauses a running attempt in one transaction: state PAUSED with its resume time and reason, the private resume point
@@ -378,6 +384,21 @@ export class SqliteJobStore {
     return (this.db.prepare("SELECT job_id,issue_key,repair_round,paused_role,pause_code,resume_at,paused_since,pause_count FROM jobs WHERE state='PAUSED' ORDER BY resume_at,created_at,rowid").all() as Array<Record<string, unknown>>)
       .map((r) => ({ job_id: String(r.job_id), issue_key: String(r.issue_key), repair_round: Number(r.repair_round), role: r.paused_role ? String(r.paused_role) as AgentRole : null, code: r.pause_code ? String(r.pause_code) as ErrorCode : null,
         resume_at: r.resume_at ? String(r.resume_at) : null, paused_since: r.paused_since ? String(r.paused_since) : null, pause_count: Number(r.pause_count ?? 0) }));
+  }
+  /** Records (or extends/refreshes) known provider limits until `until`. */
+  recordProviderLimits(providers: string[], until: string, at: string, jobId: string | null): void {
+    timestampSchema.parse(until); timestampSchema.parse(at);
+    this.tx(() => { for (const provider of new Set(providers)) this.db.prepare('INSERT INTO provider_limits(provider,limited_until,recorded_at,job_id) VALUES(?,?,?,?) ON CONFLICT(provider) DO UPDATE SET limited_until=excluded.limited_until, recorded_at=excluded.recorded_at, job_id=excluded.job_id').run(providerSchema.parse(provider), until, at, jobId); });
+  }
+  /** Unexpired provider limits at `at`, earliest expiry first. */
+  providerLimits(at: string): Array<{ provider: ProviderResult['provider']; until: string }> {
+    return (this.db.prepare('SELECT provider,limited_until FROM provider_limits WHERE limited_until>? ORDER BY limited_until,provider').all(timestampSchema.parse(at)) as Array<{ provider: string; limited_until: string }>)
+      .map((r) => ({ provider: providerSchema.parse(r.provider), until: r.limited_until }));
+  }
+  /** Drops expired limits (returns how many); with `provider`, drops that provider's limit (a run on it succeeded). */
+  clearProviderLimits(at: string, provider?: string): number {
+    if (provider !== undefined) return Number(this.db.prepare('DELETE FROM provider_limits WHERE provider=?').run(provider).changes);
+    return Number(this.db.prepare('DELETE FROM provider_limits WHERE limited_until<=?').run(timestampSchema.parse(at)).changes);
   }
   /** Internal retry bookkeeping. */
   autoRetryCount(jobId: string): number { jobIdSchema.parse(jobId); return Number(((this.db.prepare('SELECT auto_retry_count AS n FROM jobs WHERE job_id=?').get(jobId) as { n?: number } | undefined)?.n) ?? 0); }
@@ -483,7 +504,7 @@ export class SqliteJobStore {
     return rows.map((row) => eventFromRow(row as Record<string, unknown>));
   }
   /** slots.checks_in_use is process-local, so the caller (WorkflowService) supplies it; other processes cannot see it. */
-  activity(limits: { max_parallel: number; max_concurrent_checks: number; checks_in_use: number } = { max_parallel: 1, max_concurrent_checks: 1, checks_in_use: 0 }): WorkflowActivity {
+  activity(limits: { max_parallel: number; max_concurrent_checks: number; checks_in_use: number } = { max_parallel: 1, max_concurrent_checks: 1, checks_in_use: 0 }, gate: WorkflowActivity['provider_limits'] = { providers: [], gate_active: false, gate_until: null }): WorkflowActivity {
     const at = nowIso();
     const leased = this.db.prepare(`SELECT j.* FROM leases l JOIN jobs j ON j.job_id=l.job_id WHERE l.lease_until>? AND j.state IN ('INVESTIGATING','IMPLEMENTING','QA','REVIEW','REVISING','CANCELLING') ORDER BY l.rowid`).all(at) as Array<Record<string, unknown>>;
     const activeJobs: WorkflowActivity['active_jobs'] = leased.map((row) => {
@@ -513,7 +534,7 @@ export class SqliteJobStore {
     for (const row of this.db.prepare('SELECT state, COUNT(*) AS n FROM jobs GROUP BY state').all() as Array<{ state: string; n: number }>) counts[jobStateSchema.parse(row.state)] = Number(row.n);
     const lastId = this.db.prepare('SELECT COALESCE(MAX(event_id),0) AS id FROM job_events').get() as { id: number };
     const pausedJobs = this.pausedJobs();
-    return workflowActivitySchema.parse({ active, active_jobs: activeJobs, paused_jobs: pausedJobs, slots: { max_parallel: limits.max_parallel, in_use: activeJobs.length, max_concurrent_checks: limits.max_concurrent_checks, checks_in_use: limits.checks_in_use }, polling, counts, last_event_id: Number(lastId.id) });
+    return workflowActivitySchema.parse({ active, active_jobs: activeJobs, paused_jobs: pausedJobs, provider_limits: gate, slots: { max_parallel: limits.max_parallel, in_use: activeJobs.length, max_concurrent_checks: limits.max_concurrent_checks, checks_in_use: limits.checks_in_use }, polling, counts, last_event_id: Number(lastId.id) });
   }
   close(): void { this.db.close(); }
 }
@@ -721,7 +742,27 @@ export class WorkflowService implements WorkflowServicePort {
   subscribe(listener: (event: JobEvent) => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   async events(query: { job_id?: string; after?: number; limit: number }): Promise<JobEvent[]> { return (this.jobs as SqliteJobStore).events(query); }
   /** checks_in_use counts only this process's check runs (other processes sharing the database are not visible). */
-  async activity(): Promise<WorkflowActivity> { return (this.jobs as SqliteJobStore).activity({ max_parallel: this.maxParallel, max_concurrent_checks: this.checksLimiter.size, checks_in_use: this.checksLimiter.active }); }
+  async activity(): Promise<WorkflowActivity> { return (this.jobs as SqliteJobStore).activity({ max_parallel: this.maxParallel, max_concurrent_checks: this.checksLimiter.size, checks_in_use: this.checksLimiter.active }, this.gate()); }
+  /**
+   * The new-ticket gate. Every ticket's first agent role is SWE (initial attempts, retries and revisions alike; dry runs
+   * start no agent), so the gate is active exactly when every provider of the SWE chain has an unexpired recorded limit.
+   */
+  private gate(): WorkflowActivity['provider_limits'] {
+    const store = this.jobs as SqliteJobStore; const providers = store.providerLimits(nowIso(this.deps.clock.now()));
+    const swe = this.deps.config.agents.swe; const chain = [swe.provider, ...(swe.fallbacks ?? []).map((f) => f.provider)];
+    const covered = chain.map((p) => providers.find((l) => l.provider === p));
+    const active = covered.every((l) => l !== undefined);
+    return { providers, gate_active: active, gate_until: active ? covered.map((l) => l!.until).sort()[0] ?? null : null };
+  }
+  private gateWasActive: boolean | undefined;
+  /** Emits provider_gate_opened/closed on a change of the gate (expiry is noticed when drain or a run looks at it). */
+  private observeGate(reason: string): WorkflowActivity['provider_limits'] {
+    const store = this.jobs as SqliteJobStore; store.clearProviderLimits(nowIso(this.deps.clock.now()));
+    const gate = this.gate(); const before = this.gateWasActive; this.gateWasActive = gate.gate_active;
+    if (gate.gate_active && before !== true) this.emit({ job_id: null, issue_key: null, type: 'provider_gate_opened', ...(gate.gate_until ? { resume_at: gate.gate_until } : {}), count: gate.providers.length, message: `Provider limits: ${gate.providers.map((l) => l.provider).join(', ')} until ${gate.gate_until ?? 'unknown'}; new tickets wait` });
+    else if (!gate.gate_active && before === true) this.emit({ job_id: null, issue_key: null, type: 'provider_gate_closed', message: `Provider limit gate lifted (${reason}); new tickets may start` });
+    return gate;
+  }
   /** Validates, persists and fans out one progress event. Never throws: observability must not break the workflow. */
   private emit(event: NewJobEvent): void {
     let saved: JobEvent;
@@ -1004,6 +1045,7 @@ export class WorkflowService implements WorkflowServicePort {
       await this.recover();
       this.startAutoPrune();
       await this.requeueShutdownCancelled();
+      this.observeGate('expired');
       const store = this.jobs as SqliteJobStore; const due = () => nowIso(this.deps.clock.now());
       if (!(await store.listDue(1, due())).length) return;
       if (!(await this.runnerReady())) return; // leave everything QUEUED; nothing is claimed while the isolation boundary is down
@@ -1014,7 +1056,9 @@ export class WorkflowService implements WorkflowServicePort {
         const worker = async (): Promise<void> => {
           for (;;) {
             if (signal?.aborted || noSlot) return;
-            const next = (await store.listDue(100, due())).find((j) => !inFlight.has(j.job_id) && !skipped.has(j.job_id));
+            const gated = this.observeGate('expired').gate_active;
+            // Due PAUSED attempts always resume; while the gate is active new (non-dry-run) QUEUED tickets wait untouched.
+            const next = (await store.listDue(100, due())).find((j) => !inFlight.has(j.job_id) && !skipped.has(j.job_id) && !(gated && j.state === 'QUEUED' && !j.dry_run));
             if (!next) return;
             inFlight.add(next.job_id);
             try { await this.executeJob(next.job_id, signal, true); ran++; }
@@ -1405,6 +1449,7 @@ export class WorkflowService implements WorkflowServicePort {
       if (outcome.ok) {
         sink.push({ role, provider: entry.provider, model: entry.model ?? null, chain_index: index, status: 'SUCCEEDED', error_code: null, elapsed_ms: Date.now() - startedAt, fell_back: false, ...sweFlags });
         (this.jobs as SqliteJobStore).resetPauseStreak(job.job_id);
+        if ((this.jobs as SqliteJobStore).clearProviderLimits(nowIso(this.deps.clock.now()), entry.provider) > 0) this.observeGate(`${entry.provider} run succeeded`);
         return outcome.result;
       }
       const code = safeError(outcome.error).code; codes.push(code);
@@ -1535,6 +1580,12 @@ export class WorkflowService implements WorkflowServicePort {
     const resumeAt = new Date(resumeMs).toISOString(); const current = await this.require(job.job_id); const count = streak.count + 1;
     const paused = store.pause(job.job_id, current.state, { resume_at: resumeAt, code, role, paused_since: since, pause_count: count, at: nowIso(now) }, { ...checkpoint, workspace_seal: seal });
     if (!paused) throw limited ?? new AutosError(code, `${role} stage did not complete successfully`); // e.g. an operator cancel won the race
+    if (limited) {
+      // Durable limit record: new tickets whose SWE chain is fully limited wait until the earliest expiry (see gate()).
+      const roleConfig = this.deps.config.agents[role];
+      store.recordProviderLimits([roleConfig.provider, ...(roleConfig.fallbacks ?? []).map((f) => f.provider)], resumeAt, nowIso(now), job.job_id);
+      this.observeGate('limits recorded');
+    }
     const after = await this.require(job.job_id);
     this.closeStage(after, 'PAUSED');
     const reason = limited?.retryAt && !limited.unknownReset ? 'provider-reported reset' : limited?.retryAt ? 'earliest of reported reset and backoff' : 'backoff';

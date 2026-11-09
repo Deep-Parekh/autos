@@ -34,3 +34,15 @@ test('show explains a paused attempt; the API exposes pause fields only while PA
   const finished = safeJob({ ...paused, state: 'CANCELLED' });
   assert.equal(finished.resume_at, undefined); assert.equal(finished.pause_code, undefined);
 });
+
+test('status and watch show the provider limit gate', () => {
+  const text = formatStatus({
+    controller: { version: '0.1.0', started_at: '2026-11-07T12:00:00.000Z', uptime_s: 60, poll_interval_s: 60, poll_loop: { running: true, next_poll_at: null, consecutive_failures: 0, auto_poll: false, last_discovery_at: null } },
+    runner: { status: 'ready', version: 1, docker: 'available' },
+    activity: { ...emptyActivity, provider_limits: { providers: [{ provider: 'codex', until: '2026-11-07T12:30:00.000Z' }, { provider: 'claude', until: '2026-11-07T13:00:00.000Z' }], gate_active: true, gate_until: '2026-11-07T12:30:00.000Z' } },
+    active_jobs: [],
+  } as never, Date.parse('2026-11-07T12:10:00.000Z'));
+  assert.match(text, /Provider limits: codex until 2026-11-07T12:30:00.000Z, claude until 2026-11-07T13:00:00.000Z; new tickets wait until 2026-11-07T12:30:00.000Z/);
+  assert.equal(formatEvent(makeEvent(5, { type: 'provider_gate_opened', job_id: null, issue_key: null, role: undefined, provider: undefined, stage: undefined, repair_round: undefined, resume_at: '2026-11-07T12:30:00.000Z' })), '12:01:05 service provider limit gate opened: new tickets wait until 2026-11-07 12:30Z');
+  assert.equal(formatEvent(makeEvent(6, { type: 'provider_gate_closed', job_id: null, issue_key: null })), '12:01:06 service provider limit gate lifted: new tickets may start');
+});

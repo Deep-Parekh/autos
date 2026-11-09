@@ -1,7 +1,7 @@
 import type { JobEvent, WorkflowActivity, WorkflowServicePort } from '@autos/contracts';
 
 export const emptyActivity: WorkflowActivity = {
-  active: null, active_jobs: [], paused_jobs: [], slots: { max_parallel: 1, in_use: 0, max_concurrent_checks: 1, checks_in_use: 0 },
+  active: null, active_jobs: [], paused_jobs: [], provider_limits: { providers: [], gate_active: false, gate_until: null }, slots: { max_parallel: 1, in_use: 0, max_concurrent_checks: 1, checks_in_use: 0 },
   polling: { in_progress: false, last_started_at: null, last_finished_at: null, last_outcome: null, last_error_code: null, last_discovered: null },
   counts: {}, last_event_id: 0,
 };

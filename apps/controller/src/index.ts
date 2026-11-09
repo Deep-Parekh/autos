@@ -199,7 +199,7 @@ const eventSchema = {
     role: { type: 'string', enum: [...roleEnum] }, provider: { type: 'string', enum: [...providerEnum] }, from_provider: { type: 'string', enum: [...providerEnum], description: 'provider_fallback only: the provider that failed (provider is the one now used).' },
     repair_round: { type: 'integer', minimum: 0, maximum: 2 }, outcome: { type: 'string' }, code: { type: 'string', enum: [...ERROR_CODES] },
     elapsed_ms: { type: 'integer', minimum: 0 }, count: { type: 'integer', minimum: 0 }, message: { type: 'string', maxLength: 300 },
-    resume_at: { type: 'string', format: 'date-time', description: 'job_paused only: when the attempt is due to resume.' },
+    resume_at: { type: 'string', format: 'date-time', description: 'job_paused: when the attempt is due to resume; provider_gate_opened: when the new-ticket gate lifts at the latest.' },
   }, required: ['event_id', 'at', 'type', 'job_id', 'issue_key'],
 } as const;
 const issueKeyParams = { type: 'object', properties: { issueKey: { type: 'string', pattern: '^[A-Z][A-Z0-9]*-[1-9][0-9]*$' } }, required: ['issueKey'] } as const;
@@ -334,6 +334,12 @@ const activitySchema = {
     active: { ...activeJobSchemaJson, type: ['object', 'null'] },
     active_jobs: { type: 'array', items: activeJobSchemaJson },
     paused_jobs: { type: 'array', items: pausedJobSchemaJson },
+    provider_limits: { type: 'object', additionalProperties: false,
+      description: 'Known provider limits and the new-ticket gate: while every SWE-chain provider is limited, new QUEUED tickets wait (due PAUSED attempts still resume).',
+      properties: {
+        providers: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string', enum: [...providerEnum] }, until: { type: 'string', format: 'date-time' } }, required: ['provider', 'until'] } },
+        gate_active: { type: 'boolean' }, gate_until: nullableString,
+      }, required: ['providers', 'gate_active', 'gate_until'] },
     slots: { type: 'object', additionalProperties: false, properties: {
       max_parallel: { type: 'integer', minimum: 1 }, in_use: { type: 'integer', minimum: 0 }, max_concurrent_checks: { type: 'integer', minimum: 1 }, checks_in_use: { type: 'integer', minimum: 0 },
     }, required: ['max_parallel', 'in_use', 'max_concurrent_checks', 'checks_in_use'] },
@@ -343,7 +349,7 @@ const activitySchema = {
     }, required: ['in_progress', 'last_started_at', 'last_finished_at', 'last_outcome', 'last_error_code', 'last_discovered'] },
     counts: { type: 'object', additionalProperties: { type: 'integer', minimum: 0 } },
     last_event_id: { type: 'integer', minimum: 0 },
-  }, required: ['active', 'active_jobs', 'paused_jobs', 'slots', 'polling', 'counts', 'last_event_id'],
+  }, required: ['active', 'active_jobs', 'paused_jobs', 'provider_limits', 'slots', 'polling', 'counts', 'last_event_id'],
 } as const;
 const statusResponseSchema = {
   type: 'object', additionalProperties: false,
@@ -358,7 +364,7 @@ const statusResponseSchema = {
     stage_elapsed_s: { type: 'integer', minimum: 0 },
     active_jobs: { type: 'array', items: activeJobWithElapsedSchema },
   }, required: ['controller', 'runner', 'activity', 'active_jobs'],
-  examples: [{ controller: { version: '0.1.0', started_at: '2026-11-07T12:00:00.000Z', uptime_s: 60, poll_interval_s: 60, poll_loop: { running: true, next_poll_at: '2026-11-07T12:01:00.000Z', consecutive_failures: 0, auto_poll: true, last_discovery_at: '2026-11-07T12:00:00.000Z' } }, runner: { status: 'unknown' }, activity: { active: null, active_jobs: [], paused_jobs: [], slots: { max_parallel: 1, in_use: 0, max_concurrent_checks: 1, checks_in_use: 0 }, polling: { in_progress: false, last_started_at: null, last_finished_at: null, last_outcome: null, last_error_code: null, last_discovered: null }, counts: {}, last_event_id: 0 }, active_jobs: [] }],
+  examples: [{ controller: { version: '0.1.0', started_at: '2026-11-07T12:00:00.000Z', uptime_s: 60, poll_interval_s: 60, poll_loop: { running: true, next_poll_at: '2026-11-07T12:01:00.000Z', consecutive_failures: 0, auto_poll: true, last_discovery_at: '2026-11-07T12:00:00.000Z' } }, runner: { status: 'unknown' }, activity: { active: null, active_jobs: [], paused_jobs: [], provider_limits: { providers: [], gate_active: false, gate_until: null }, slots: { max_parallel: 1, in_use: 0, max_concurrent_checks: 1, checks_in_use: 0 }, polling: { in_progress: false, last_started_at: null, last_finished_at: null, last_outcome: null, last_error_code: null, last_discovered: null }, counts: {}, last_event_id: 0 }, active_jobs: [] }],
 } as const;
 const retryBlockedSchema = {
   type: 'object', additionalProperties: false,
