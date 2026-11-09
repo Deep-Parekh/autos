@@ -4,6 +4,7 @@ import type { AutosError, ErrorCode } from './errors.js';
 import type { ArtifactManifest, Checks } from './evidence.js';
 import type { ProviderAuthSummary } from './execution.js';
 import type { ProviderCall } from './dataset.js';
+import type { InstalledToolchains, ToolchainSelection } from './toolchain.js';
 import type { CloseIssueRequest, CloseIssueResult, IssueClosure, IssueResolution, JobEvent, OperatorNoteRequest, PruneWorkspacesRequest, PruneWorkspacesResult, TicketNote, TicketNotesSummary, WorkflowActivity, WorkspaceEntry } from './jobs.js';
 
 export interface AtlassianReadPort {
@@ -88,6 +89,8 @@ export interface ProviderRequest {
   job_id: string; issue_key: string; provider: Provider; role: AgentRole;
   model?: string; cwd: string; prompt_path: string; transcript_path: string;
   timeout_ms: number; source_access: 'read' | 'write'; auth_profile: string;
+  /** JDK/Tomcat to mount read-only into the role container; absent means none. */
+  toolchain?: ToolchainSelection | undefined;
 }
 export interface ProviderResult {
   provider: Provider; role: AgentRole; status: 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT';
@@ -98,10 +101,14 @@ export interface ProviderResult {
 export interface ProviderAdapterPort { run(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> }
 export interface RunnerPort {
   runRole(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult>;
-  runChecks(workspace: GitWorkspace, candidateDigest: string, commands: CheckCommand[], signal?: AbortSignal): Promise<Checks>;
+  runChecks(workspace: GitWorkspace, candidateDigest: string, commands: CheckCommand[], signal?: AbortSignal, options?: RunChecksOptions): Promise<Checks>;
   stop(jobId: string): Promise<void>;
   /** Optional readiness of the isolation boundary (supervisor + Docker). Must not start a container. */
   health?(): Promise<RunnerHealth>;
+}
+export interface RunChecksOptions {
+  /** JDK/Tomcat for the checks container; absent uses the checks image's built-in JDK. Recorded in Checks.toolchain. */
+  toolchain?: ToolchainSelection | undefined;
 }
 export interface RunnerHealth {
   status: 'ready'; version: 1; docker: 'available' | 'unavailable' | 'test-only';
@@ -109,6 +116,8 @@ export interface RunnerHealth {
   auth?: ProviderAuthSummary[];
   /** True when the supervisor refuses every profile that is not mode=subscription (AUTOS_REQUIRE_SUBSCRIPTION). */
   require_subscription?: boolean;
+  /** Installed, validated toolchains under AUTOS_TOOLCHAIN_ROOT; absent when the supervisor has no toolchain root. */
+  toolchains?: InstalledToolchains;
 }
 export interface JobRecord {
   job_id: string; issue_key: string; repository_id: string | null; base_sha: string | null;

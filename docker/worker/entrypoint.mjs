@@ -1,3 +1,5 @@
+import { cp, mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
 import { CliProviderAdapter } from '@autos/cli-adapters';
 import { ERROR_CODES } from '@autos/contracts';
 
@@ -41,6 +43,15 @@ function parseArgs(argv) {
   return args;
 }
 
+/** Tomcat needs a writable CATALINA_BASE; the read-only CATALINA_HOME/conf is copied in (symlinks are copied as links, never followed). */
+async function prepareCatalinaBase() {
+  const home = process.env.CATALINA_HOME;
+  const base = process.env.CATALINA_BASE;
+  if (!home || !base) return;
+  for (const directory of ['conf', 'logs', 'temp', 'work', 'webapps']) await mkdir(join(base, directory), { recursive: true });
+  await cp(join(home, 'conf'), join(base, 'conf'), { recursive: true, force: true, dereference: false, verbatimSymlinks: true });
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   invocation = { provider: args.provider, role: args.role, model: args.model, transcript: args.transcript };
@@ -50,6 +61,7 @@ async function main() {
     codex: ['HOME', 'OPENAI_API_KEY', 'CODEX_HOME'],
     cursor: ['HOME', 'CURSOR_API_KEY', 'CURSOR_CONFIG_DIR'],
   };
+  await prepareCatalinaBase();
   const timeoutMs = envInteger('AUTOS_TIMEOUT_MS', DEFAULT_TIMEOUT_MS, 1_000, MAX_TIMEOUT_MS);
   const maxPromptBytes = envInteger('AUTOS_MAX_PROMPT_BYTES', DEFAULT_MAX_PROMPT_BYTES, 1_024, 10_000_000);
   const maxTranscriptBytes = envInteger('AUTOS_MAX_TRANSCRIPT_BYTES', DEFAULT_MAX_TRANSCRIPT_BYTES, 65_536, 52_428_800);

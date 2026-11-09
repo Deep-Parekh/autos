@@ -7142,6 +7142,21 @@ paths:
                           - available
                           - unavailable
                           - test-only
+                      toolchains:
+                        type: object
+                        additionalProperties: false
+                        properties:
+                          jdk:
+                            type: array
+                            items:
+                              type: string
+                          tomcat:
+                            type: array
+                            items:
+                              type: string
+                        required:
+                          - jdk
+                          - tomcat
                     required:
                       - status
                   activity:

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { parseDocument } from 'yaml';
 import { AutosError } from './errors.js';
 import { branchNameSchema, envNameSchema, identifierSchema, modelSchema, projectKeySchema, providerSchema } from './domain.js';
+import { jdkVersionSchema, tomcatVersionSchema } from './toolchain.js';
 
 /** Upper bound for jobs.max_parallel; raising it is a reviewed code change, not just configuration. */
 export const MAX_PARALLEL_JOBS = 8;
@@ -94,7 +95,7 @@ export const configSchema = z.strictObject({
     auto_prune_workspaces: z.boolean().default(true),
     similar_tickets: z.strictObject({ enabled: z.boolean(), max_candidates: z.number().int().min(1).max(5) }),
   }).refine((jobs) => (jobs.max_concurrent_checks ?? 1) <= jobs.max_parallel, { message: 'max_concurrent_checks must not exceed max_parallel', path: ['max_concurrent_checks'] }),
-  build_profiles: z.record(identifierSchema, z.strictObject({ jdk: z.enum(['17', '21']).optional(), checks: z.array(checkCommandSchema).min(1) })),
+  build_profiles: z.record(identifierSchema, z.strictObject({ jdk: jdkVersionSchema.optional(), tomcat: tomcatVersionSchema.optional(), checks: z.array(checkCommandSchema).min(1) })),
   security: z.strictObject({ allow_jira_write: z.literal(false), allow_confluence_write: z.literal(false), allow_merge: z.literal(false), allow_deploy: z.literal(false), allow_prod_db: z.literal(false) }),
   storage: z.strictObject({ data_dir: z.string().min(1), artifacts_dir: z.string().min(1), workspaces_dir: z.string().min(1) }),
   api: z.strictObject({ listen_host: z.enum(['127.0.0.1', '::1']), port: z.number().int().min(1024).max(65535), operator_token_env: envNameSchema }),

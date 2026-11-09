@@ -83,3 +83,67 @@ test('401 tells operators to use a classic API token without leaking secrets', a
   const client = createAtlassianClient({ config, credentials, now, fetch: async () => new Response('secret-body', { status: 401 }) });
   await assert.rejects(client.getBranchMap(config.confluence.branch_map_page_id), (error: unknown) => error instanceof AutosError && error.code === 'AUTH' && error.message.includes('classic (unscoped) API token') && !error.message.includes('secret'));
 });
+
+const headerWith = (...extra: string[]) => header.replace('</tr>', `${extra.map((name) => `<th>${name}</th>`).join('')}</tr>`);
+const rowWith = (project: string, repo: string, ...extra: string[]) => row(project, repo).replace('</tr>', `${extra.map((cell) => `<td>${cell}</td>`).join('')}</tr>`);
+const tableWith = (head: string, ...rows: string[]) => `<table>${head}${rows.join('')}</table>`;
+
+test('JDK and Tomcat columns populate the mapping', async () => {
+  const { client } = setup(tableWith(headerWith('JDK', 'Tomcat'), rowWith('SAMPLE', 'sample-app', '21', 'Tomcat 11.0.24'), rowWith('OTHER', 'other-app', 'JDK 25', 'apache-tomcat-9.0.50')));
+  assert.deepEqual(await client.resolveProjectMapping('SAMPLE').then((m) => [m.jdk, m.tomcat]), ['21', '11.0.24']);
+  assert.deepEqual(await client.resolveProjectMapping('OTHER').then((m) => [m.jdk, m.tomcat]), ['25', '9.0.50']);
+});
+
+test('JDK and Tomcat cell variants normalize', async () => {
+  const cases: [string, string, string][] = [['Corretto 21', '11.0.24', '21'], ['21.0.9', 'Tomcat 11.0.24', '21'], ['JDK 25', 'apache-tomcat-9.0.50', '25']];
+  for (const [jdk, tomcat, expectedJdk] of cases) {
+    const { client } = setup(tableWith(headerWith('JDK', 'Tomcat'), rowWith('SAMPLE', 'sample-app', jdk, tomcat)));
+    const mapping = await client.resolveProjectMapping('SAMPLE');
+    assert.equal(mapping.jdk, expectedJdk);
+    assert.equal(mapping.tomcat, tomcat.replace(/^(?:Tomcat |apache-tomcat-)/, ''));
+  }
+});
+
+test('blank JDK and Tomcat cells and absent columns map to null', async () => {
+  const blank = setup(tableWith(headerWith('JDK', 'Tomcat'), rowWith('SAMPLE', 'sample-app', '', '')));
+  const blankMapping = await blank.client.resolveProjectMapping('SAMPLE');
+  assert.equal(blankMapping.jdk, null);
+  assert.equal(blankMapping.tomcat, null);
+  const absent = setup(table(good));
+  const absentMapping = await absent.client.resolveProjectMapping('SAMPLE');
+  assert.equal(absentMapping.jdk, null);
+  assert.equal(absentMapping.tomcat, null);
+});
+
+test('only one of the optional columns may be present', async () => {
+  const jdkOnly = await setup(tableWith(headerWith('JDK'), rowWith('SAMPLE', 'sample-app', '21'))).client.resolveProjectMapping('SAMPLE');
+  assert.deepEqual([jdkOnly.jdk, jdkOnly.tomcat], ['21', null]);
+  const tomcatOnly = await setup(tableWith(headerWith('Tomcat'), rowWith('SAMPLE', 'sample-app', '11.0.24'))).client.resolveProjectMapping('SAMPLE');
+  assert.deepEqual([tomcatOnly.jdk, tomcatOnly.tomcat], [null, '11.0.24']);
+});
+
+test('unrecognized JDK or Tomcat value invalidates only that project without echoing the cell', async () => {
+  const { client, page } = setup(tableWith(headerWith('JDK', 'Tomcat'), rowWith('SAMPLE', 'sample-app', '21', '11.0.24'), rowWith('OTHER', 'other-app', 'java-secret-x', '')));
+  const report = await client.getBranchMapReport(page);
+  assert.deepEqual(report.mappings.map((m) => m.project_key), ['SAMPLE']);
+  assert.equal(report.invalid_projects[0]?.project_key, 'OTHER');
+  assert.equal(report.invalid_projects[0]?.reason, 'Branch map JDK value for this project is not recognized (use a major version such as 21)');
+  const tomcat = setup(tableWith(headerWith('JDK', 'Tomcat'), rowWith('SAMPLE', 'sample-app', '21', '11.0.24'), rowWith('OTHER', 'other-app', '21', 'tomcat-secret-x')));
+  const tomcatReport = await tomcat.client.getBranchMapReport(tomcat.page);
+  assert.deepEqual(tomcatReport.mappings.map((m) => m.project_key), ['SAMPLE']);
+  assert.equal(tomcatReport.invalid_projects[0]?.reason, 'Branch map Tomcat value for this project is not recognized (use a full version such as 11.0.24)');
+  assert.ok(!JSON.stringify(tomcatReport).includes('secret-x'));
+});
+
+test('unknown extra column or duplicate JDK header still rejects the table', async () => {
+  for (const head of [headerWith('JDK', 'Notes'), headerWith('JDK', 'JDK')]) {
+    const { client, page } = setup(tableWith(head, rowWith('SAMPLE', 'sample-app', '21', '21')));
+    await assert.rejects(client.getBranchMapReport(page), isMapping());
+  }
+});
+
+test('optional headers are matched case-insensitively with normalized whitespace', async () => {
+  const { client } = setup(tableWith(headerWith(' jdk ', '  TOMCAT'), rowWith('SAMPLE', 'sample-app', '17', '10.1.20')));
+  const mapping = await client.resolveProjectMapping('SAMPLE');
+  assert.deepEqual([mapping.jdk, mapping.tomcat], ['17', '10.1.20']);
+});

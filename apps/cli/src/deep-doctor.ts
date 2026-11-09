@@ -1,7 +1,7 @@
 import { access, stat, statfs } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { AutosError, type AutosConfig } from '@autos/contracts';
+import { AutosError, missingToolchains, resolveToolchain, type AutosConfig, type InstalledToolchains } from '@autos/contracts';
 import type { ControllerServices } from '@autos/controller';
 
 export interface CheckResult { name: string; status: 'PASS' | 'WARN' | 'FAIL'; message: string }
@@ -36,6 +36,8 @@ export async function deepChecks(input: { config: AutosConfig; env: NodeJS.Proce
     try { await run(); } catch (error) { add(name, 'FAIL', `check failed (${code(error)})`); }
   };
 
+  let installed: InstalledToolchains | undefined;
+
   // Supervisor socket and runner health.
   const socketPath = join(resolve(cwd, config.storage.data_dir), 'runner.sock');
   await guard('supervisor_socket', async () => {
@@ -52,6 +54,10 @@ export async function deepChecks(input: { config: AutosConfig; env: NodeJS.Proce
     else if (health.status === 'ready') add('runner_health', 'FAIL', 'runner reachable but docker is unavailable');
     else if (health.status === 'unknown') add('runner_health', 'WARN', 'runner health is unknown');
     else add('runner_health', 'FAIL', 'runner is unreachable; check the supervisor socket and service');
+  });
+  await guard('toolchain_report', async () => {
+    const health = runtime?.runnerHealth ? await runtime.runnerHealth() : undefined;
+    if (health?.status === 'ready') installed = health.toolchains;
   });
   await guard('provider_auth', async () => {
     const health = runtime?.runnerHealth ? await runtime.runnerHealth() : undefined;
@@ -91,6 +97,37 @@ export async function deepChecks(input: { config: AutosConfig; env: NodeJS.Proce
     projects = await runtime.projects();
     const enabled = projects.filter((project) => project.enabled).length;
     add('confluence_branch_map', projects.length === 0 || enabled === 0 ? 'FAIL' : 'PASS', `branch map page ${config.confluence.branch_map_page_id}: ${projects.length} project mapping(s), ${enabled} enabled`);
+  });
+  await guard('toolchains', async () => {
+    if (!projects) { add('toolchains', 'WARN', 'skipped: branch map unavailable'); return; }
+    const allowed = new Set(config.jira.allowed_projects);
+    const profileOf = (id: string | undefined): { jdk?: string; tomcat?: string } | undefined => {
+      const profile = id ? config.build_profiles[id] : undefined;
+      return profile ? { ...(profile.jdk ? { jdk: profile.jdk } : {}), ...(profile.tomcat ? { tomcat: profile.tomcat } : {}) } : undefined;
+    };
+    const hint = 'run scripts/install-toolchains.ts to install it on the supervisor host';
+    const selections: string[] = [];
+    const failures: string[] = [];
+    const missing: string[] = [];
+    const noJdk: string[] = [];
+    let unreported = false;
+    for (const mapping of projects.filter((project) => project.enabled && allowed.has(project.project_key))) {
+      const repository = config.bitbucket.allowed_repositories.find((entry) => entry.workspace === mapping.workspace && entry.repository_slug === mapping.repository_slug);
+      const resolved = resolveToolchain({ jdk: mapping.jdk ?? null, tomcat: mapping.tomcat ?? null }, profileOf(repository?.build_profile));
+      if (!resolved.ok) { failures.push(`${mapping.project_key}: ${resolved.reason}`); continue; }
+      const selection = resolved.toolchain;
+      if (!selection) { noJdk.push(mapping.project_key); continue; }
+      selections.push(`${mapping.project_key}: JDK ${selection.jdk}${selection.tomcat ? ` + Tomcat ${selection.tomcat}` : ''}`);
+      if (!installed) { unreported = true; continue; }
+      const lacking = missingToolchains(selection, installed);
+      if (lacking.length) missing.push(`${mapping.project_key} needs ${lacking.join(' and ')} (not installed)`);
+    }
+    const have = installed ? ` (installed: JDK ${installed.jdk.join(', ') || 'none'}; Tomcat ${installed.tomcat.join(', ') || 'none'})` : '';
+    if (failures.length) add('toolchains', 'FAIL', failures.join('; '));
+    else if (missing.length) add('toolchains', 'FAIL', `${missing.join('; ')}${have}; ${hint}`);
+    else if (unreported) add('toolchains', 'WARN', `${selections.join('; ')}: supervisor does not report installed toolchains; update the supervisor or set AUTOS_TOOLCHAIN_ROOT`);
+    else if (noJdk.length) add('toolchains', 'WARN', `${noJdk.join(', ')}: no JDK configured; agents get no Java and checks use the checks image JDK${selections.length ? `; ${selections.join('; ')}${have}` : ''}`);
+    else add('toolchains', 'PASS', `${selections.join('; ') || 'no enabled allowed projects'}${have}`);
   });
 
   // Development branch heads (read-only ls-remote/fetch inside the git runner) for every mapped project.

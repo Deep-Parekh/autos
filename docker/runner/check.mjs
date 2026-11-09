@@ -70,6 +70,8 @@ async function run(command, timeoutMs) {
     let timedOut = false;
     const excerpt = createExcerpt();
     const env = { PATH: process.env.PATH ?? '', HOME: '/tmp', TMPDIR: '/tmp', LANG: 'C.UTF-8' };
+    // Per-project toolchain (mounted by the trusted runner): JAVA_HOME and Tomcat locations pass through; PATH is already the runner's.
+    for (const name of ['JAVA_HOME', 'CATALINA_HOME', 'CATALINA_BASE']) if (process.env[name]) env[name] = process.env[name];
     if (existsSync('/opt/autos/m2/repository')) env.MAVEN_OPTS = '-Dmaven.repo.local=/opt/autos/m2/repository';
     try { child = spawn(command[0], command.slice(1), { cwd: '/scratch', env, shell: false, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] }); }
     catch { resolvePromise({ code: null, timedOut, output_excerpt: '[check process could not start]' }); return; }

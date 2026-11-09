@@ -86,7 +86,25 @@ mvn -B -Dmaven.repo.local="$HOME/.autos/m2-repository" dependency:go-offline tes
 cd - && rm -rf /tmp/autos-prefetch
 ```
 
+If the prefetch fails with `Non-parseable POM … unexpected markup <!d`, a proxied repository served an HTML page instead of a POM and it was cached. Delete that artifact's folder from `~/.autos/m2-repository`, seed the cache from your working local repository (`rsync -a --ignore-existing ~/.m2/repository/ ~/.autos/m2-repository/`), and rerun. Run the prefetch (or at least `test-compile`) with each branch's own JDK (`JAVA_HOME=$(/usr/libexec/java_home -v 21) mvn …`): compiling a Java 21 branch on JDK 25 fails inside Lombok with `TypeTag :: UNKNOWN`.
+
 Private artifacts must come from your normal approved Maven access during this prefetch; no Maven `settings.xml` or credentials are mounted into checks. If `go-offline` misses plugins, run the repository's real test command once with the same `-Dmaven.repo.local` to populate them. For non-Maven toolchains, build the dependencies into a derived checks image instead.
+
+### JDK and Tomcat per project
+
+Agents and checks get the JDK (and optionally Tomcat) named on the project's branch-map row, mounted read-only from a toolchain folder outside the project. Install what the branch map uses:
+
+```sh
+node --conditions=development --import tsx scripts/install-toolchains.ts jdk 21 25
+node --conditions=development --import tsx scripts/install-toolchains.ts tomcat ~/sunnet/software/apache-tomcat-11.0.24
+node --conditions=development --import tsx scripts/install-toolchains.ts list
+```
+
+- **JDKs** are Linux Amazon Corretto builds copied out of the official `amazoncorretto:<major>-al2023` images for this machine's architecture. macOS JDKs cannot run inside the Linux containers.
+- **Tomcat** is copied from your local install and sanitized: scripts and jars (JDBC drivers kept) are copied; `setenv.*`, Windows `.dll`/`.exe`/`.bat` files, `tomcat-users.xml`, keystores, Kerberos/JAAS files (`krb5.conf`, `login.conf`), `webapps`, `logs`, `work` and `temp` are not; `context.xml` is replaced with a stock file, `server.xml` with a minimal one if it holds datasources or passwords, and credential lines are dropped from property files. The output lists exactly what was kept, replaced and skipped.
+- The folder is `~/.autos/toolchains` (`AUTOS_TOOLCHAIN_ROOT`); `--force` replaces an installed version.
+
+Then add `JDK` and `Tomcat` columns to the Confluence branch map (for example `25` and `11.0.24`). A blank cell falls back to the repository build profile's `jdk`/`tomcat` in `config/config.yaml`. A project whose JDK or Tomcat is not installed is blocked with a clear reason; `doctor --deep` checks this up front. No database credentials are available to agents in this phase.
 
 ## 6. Start the supervisor
 
@@ -96,7 +114,7 @@ In its own terminal:
 scripts/pilot-supervisor.sh
 ```
 
-It refuses to start if an image, the network, the profile file (mode 600, outside the repo) or the Maven cache is missing, then listens on `data/runner.sock`.
+It refuses to start if an image, the network, the profile file (mode 600, outside the repo), the Maven cache or the toolchain folder is missing, then listens on `data/runner.sock`.
 
 ## 7. Run the pilot
 
@@ -110,8 +128,8 @@ node apps/cli/bin/autos.mjs --config config/config.yaml run ABC-123 --dry-run
 node apps/cli/bin/autos.mjs --config config/config.yaml run ABC-123
 ```
 
-1. **doctor** checks configuration references and local binaries. It reports `cursor-agent` as missing; that is expected while no role uses Cursor.
-2. **providers test --all** runs a read-only smoke test of each provider in a real container. Claude and Codex must report `PASS`; Cursor will `FAIL` until it is installed.
+1. **doctor** checks configuration references and local binaries (host binaries are informational; the agents run the CLIs baked into the image). `doctor --deep` also checks the supervisor, Jira filter, branch map, remotes, disk and each provider profile's mode.
+2. **providers test --all** runs a read-only smoke test of each provider in a real container. All three must report `PASS` before a real run.
 3. **--dry-run** reads the ticket, the filter membership and the branch map, and pins the development-branch SHA. It must end `PLANNED` with no agent run and no branch. Check `artifacts/<jobId>/branch-map.json` and `base.json`.
 4. **The real run** of one low-risk, reproducible bug should end `READY_FOR_HUMAN`. Inspect `artifacts/<jobId>/summary.md`, `checks.json`, `qa.json`, `review.json` and `rounds.json`, and the commit on `deep/<KEY>` in `workspaces/<jobId>/`. `BLOCKED` with a reason is a valid outcome; read `blocked_reason` before retrying with `autos retry <jobId>`. After your manual check, either `autos revise <KEY> --note "…"` for more work, or merge it yourself and run `autos close <KEY> --merged` to delete its workspace (evidence is kept).
 
@@ -145,6 +163,7 @@ Each ticket still gets its own workspace, branch and short-lived containers, so 
 | Supervisor exits with a profile error | A profile lacks `mode`, mixes an API key into a subscription entry, or is not `subscription` while `AUTOS_REQUIRE_SUBSCRIPTION=true` |
 | Smoke test `FAIL (TOOL)` with network errors | `AUTOS_PROVIDER_NETWORK` unset, or the network does not exist |
 | Checks fail on dependency resolution | The offline Maven cache is incomplete (step 5) |
+| `MAPPING`: required toolchain not installed | Install it with `scripts/install-toolchains.ts` (the JDK major or exact Tomcat version on the branch-map row) and restart the supervisor |
 | Supervisor "Dependency cache" error | The cache must not be inside the auth, workspace or artifact folders |
 
 ## Known gaps

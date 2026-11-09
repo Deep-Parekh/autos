@@ -84,6 +84,17 @@ sudo -u autos mvn -B -Dmaven.repo.local=/var/lib/autos/m2-repository dependency:
 cd / && sudo rm -rf /tmp/autos-prefetch
 ```
 
+### Toolchains
+
+Install the JDKs and Tomcats your branch map names into `/opt/autos/toolchains` (`AUTOS_TOOLCHAIN_ROOT`), as the `autos` user:
+
+```sh
+node --conditions=development --import tsx scripts/install-toolchains.ts --root /opt/autos/toolchains jdk 21 25
+node --conditions=development --import tsx scripts/install-toolchains.ts --root /opt/autos/toolchains tomcat /path/to/apache-tomcat-11.0.24
+```
+
+JDKs are extracted for the server's own architecture, so install them on the server rather than copying them from a Mac. Copy Tomcat folders to the server first; the installer sanitizes them the same way as on the pilot Mac (see docs/local-pilot.md).
+
 ## 6. Start the services
 
 ```sh

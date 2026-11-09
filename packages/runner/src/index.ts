@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, chown, lstat, mkdir, mkdtemp, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmod, chown, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createConnection } from 'node:net';
 import { createServer, request as httpRequest } from 'node:http';
 import type { Server } from 'node:http';
-import { AutosError, ERROR_CODES, branchNameSchema, checkCommandSchema, checksSchema, digestSchema, gitShaSchema, issueKeySchema, jobIdSchema, providerRequestSchema, providerResultSchema } from '@autos/contracts';
-import type { CheckCommand, Checks, GitWorkspace, ProviderAuthSummary, ProviderRequest, ProviderResult, RunnerHealth, RunnerPort } from '@autos/contracts';
+import { AutosError, ERROR_CODES, TOOLCHAIN_MOUNTS, branchNameSchema, checkCommandSchema, checksSchema, digestSchema, gitShaSchema, installedToolchainsSchema, issueKeySchema, jdkVersionSchema, jobIdSchema, providerRequestSchema, providerResultSchema, toolchainSelectionSchema, tomcatVersionSchema } from '@autos/contracts';
+import type { CheckCommand, Checks, GitWorkspace, InstalledToolchains, ProviderAuthSummary, ProviderRequest, ProviderResult, RunChecksOptions, RunnerHealth, RunnerPort, ToolchainSelection } from '@autos/contracts';
 import { CODEX_AUTH_FILE, CODEX_STAGED_CONFIG, readCodexAuthFile, validateCodexAuthDirectory, validateCodexAuthJson, validateProviderAuthProfile } from './auth.js';
 import type { ProviderAuthProfile } from './auth.js';
 
@@ -28,6 +28,11 @@ export interface DockerRunnerOptions {
   outputRoot: string;
   authRoot?: string;
   dependencyCacheRoot?: string;
+  /**
+   * Operator-installed JDK/Tomcat toolchains (`<root>/jdk/<major>`, `<root>/tomcat/<version>`), mounted read-only into role and
+   * check containers on request. Must be disjoint from the workspace, output, authentication and dependency cache roots.
+   */
+  toolchainRoot?: string;
   authProfiles?: (profile: string, provider: ProviderRequest['provider']) => Promise<ProviderAuthProfile>;
   /** Explicitly approved outbound provider network. Defaults to Docker's isolated `none` network. */
   providerNetwork?: { name: string; approved: true };
@@ -97,6 +102,106 @@ function mount(path: string, target: string, mode: 'ro' | 'rw'): string[] {
   if (/[\0-\x1f\x7f,]/.test(path)) throw new AutosError('POLICY', 'Filesystem mount path contains unsupported characters');
   // Docker's --mount has no `rw` field: read-write is the default and read-only is spelled `readonly`.
   return ['--mount', `type=bind,src=${path},dst=${target}${mode === 'ro' ? ',readonly' : ''}`];
+}
+
+/** PATH of the Debian-based worker and checks images; toolchain PATHs prepend to it so image tools keep working. */
+const IMAGE_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+const MAVEN_BIN = '/opt/maven/bin';
+const JAVA_VERSION_PATTERN = /^[0-9][0-9A-Za-z.+_-]{0,63}$/;
+
+interface ResolvedToolchain { jdkDir: string; tomcatDir?: string; javaVersion?: string }
+
+function releaseValue(text: string, key: string): string | undefined {
+  const match = new RegExp(`^${key}=(?:"([^"\\r\\n]*)"|([^\\s"]*))\\s*$`, 'm').exec(text);
+  return match ? (match[1] ?? match[2]) : undefined;
+}
+
+/** A real directory (not a symlink) inside `parent`; returns its canonical path or undefined. */
+async function realDirectoryInside(parent: string, name: string): Promise<string | undefined> {
+  const path = join(parent, name);
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isDirectory()) return undefined;
+    const real = await realpath(path);
+    return real !== parent && isInside(parent, real) ? real : undefined;
+  } catch { return undefined; }
+}
+
+async function regularFileInside(directory: string, relativePath: string): Promise<string | undefined> {
+  try {
+    const real = await realpath(join(directory, relativePath));
+    if (!isInside(directory, real) || !(await stat(real)).isFile()) return undefined;
+    return real;
+  } catch { return undefined; }
+}
+
+/** Validates a JDK directory; returns its release JAVA_VERSION (possibly unsuitable for evidence) or undefined when invalid. */
+async function inspectJdk(jdkParent: string, major: string): Promise<{ dir: string; javaVersion: string } | undefined> {
+  if (!jdkVersionSchema.safeParse(major).success) return undefined;
+  const dir = await realDirectoryInside(jdkParent, major);
+  if (!dir || !(await regularFileInside(dir, 'bin/java'))) return undefined;
+  const release = await regularFileInside(dir, 'release');
+  if (!release) return undefined;
+  try {
+    if ((await stat(release)).size > 65_536) return undefined;
+    const text = await readFile(release, 'utf8');
+    const version = releaseValue(text, 'JAVA_VERSION');
+    if (!version || version.split(/[.+_-]/)[0] !== major || releaseValue(text, 'OS_NAME') !== 'Linux') return undefined;
+    return { dir, javaVersion: version };
+  } catch { return undefined; }
+}
+
+async function inspectTomcat(tomcatParent: string, version: string): Promise<string | undefined> {
+  if (!tomcatVersionSchema.safeParse(version).success) return undefined;
+  const dir = await realDirectoryInside(tomcatParent, version);
+  if (!dir) return undefined;
+  for (const required of ['bin/catalina.sh', 'lib/catalina.jar', 'conf/server.xml']) if (!(await regularFileInside(dir, required))) return undefined;
+  return dir;
+}
+
+async function toolchainParents(root: string): Promise<{ jdk: string | undefined; tomcat: string | undefined }> {
+  const base = await canonical(root);
+  return { jdk: await realDirectoryInside(base, 'jdk'), tomcat: await realDirectoryInside(base, 'tomcat') };
+}
+
+/** Lists the validated toolchains installed under `root` (names only, sorted). Invalid, symlinked or foreign-OS entries are ignored. */
+export async function listInstalledToolchains(root: string): Promise<InstalledToolchains> {
+  const parents = await toolchainParents(root).catch(() => ({ jdk: undefined, tomcat: undefined }));
+  const jdk: string[] = [];
+  const tomcat: string[] = [];
+  const jdkParent = parents.jdk;
+  const tomcatParent = parents.tomcat;
+  if (jdkParent) for (const name of await readdir(jdkParent).catch(() => [] as string[])) if (await inspectJdk(jdkParent, name)) jdk.push(name);
+  if (tomcatParent) for (const name of await readdir(tomcatParent).catch(() => [] as string[])) if (await inspectTomcat(tomcatParent, name)) tomcat.push(name);
+  jdk.sort((x, y) => Number(x) - Number(y));
+  tomcat.sort((x, y) => x.localeCompare(y, undefined, { numeric: true }));
+  return installedToolchainsSchema.parse({ jdk, tomcat });
+}
+
+/** Resolves a selection to canonical host paths. Anything missing or invalid is a non-retryable configuration error. */
+async function resolveToolchain(root: string | undefined, untrusted: unknown): Promise<ResolvedToolchain> {
+  const parsed = toolchainSelectionSchema.safeParse(untrusted);
+  if (!parsed.success) throw new AutosError('INVALID_INPUT', 'Toolchain selection is invalid');
+  const selection: ToolchainSelection = parsed.data;
+  const missing = (what: string) => new AutosError('INVALID_CONFIG', `Required toolchain is not installed on the runner: ${what}`, { retryable: false });
+  if (!root) throw missing(`JDK ${selection.jdk}`);
+  const parents = await toolchainParents(root).catch(() => ({ jdk: undefined, tomcat: undefined }));
+  const jdk = parents.jdk ? await inspectJdk(parents.jdk, selection.jdk) : undefined;
+  if (!jdk) throw missing(`JDK ${selection.jdk}`);
+  let tomcatDir: string | undefined;
+  if (selection.tomcat) {
+    tomcatDir = parents.tomcat ? await inspectTomcat(parents.tomcat, selection.tomcat) : undefined;
+    if (!tomcatDir) throw missing(`Tomcat ${selection.tomcat}`);
+  }
+  return { jdkDir: jdk.dir, ...(tomcatDir ? { tomcatDir } : {}), ...(JAVA_VERSION_PATTERN.test(jdk.javaVersion) ? { javaVersion: jdk.javaVersion } : {}) };
+}
+
+function toolchainMounts(resolved: ResolvedToolchain): string[] {
+  return [...mount(resolved.jdkDir, TOOLCHAIN_MOUNTS.jdk, 'ro'), ...(resolved.tomcatDir ? mount(resolved.tomcatDir, TOOLCHAIN_MOUNTS.tomcat, 'ro') : [])];
+}
+
+function envArgs(values: [string, string][]): string[] {
+  return values.flatMap(([key, value]) => ['--env', `${key}=${value}`]);
 }
 
 function containerName(jobId: string, role: string): string {
@@ -235,6 +340,7 @@ export class DockerRunner implements RunnerPort {
   constructor(options: DockerRunnerOptions) {
     validateOptions(options);
     assertRunnerPaths(options);
+    assertToolchainRootDisjointLexically(options);
     this.options = options;
     this.executor = options.executor ?? defaultDockerExecutor;
     this.limits = { ...defaultLimits, ...options.limits };
@@ -248,6 +354,7 @@ export class DockerRunner implements RunnerPort {
     ]);
     if (promptRoot !== outputRoot || isInside(workspaceRoot, outputRoot) || isInside(outputRoot, workspaceRoot)) throw new AutosError('POLICY', 'Workspace and private artifact roots must be canonical and disjoint');
     if (this.options.authRoot) await Promise.all([assertDisjoint(workspaceRoot, this.options.authRoot, 'Authentication directory'), assertDisjoint(outputRoot, this.options.authRoot, 'Authentication directory')]);
+    if (request.toolchain || this.options.toolchainRoot) await this.assertToolchainRootDisjoint(workspaceRoot, outputRoot);
     if (!isInside(workspaceRoot, cwd) || !isInside(promptRoot, prompt) || isInside(workspaceRoot, prompt) || isInside(workspaceRoot, resolve(request.transcript_path))) throw new AutosError('POLICY', 'Provider paths violate the configured workspace boundary');
     const outputDir = await contained(outputRoot, dirname(request.transcript_path), 'Transcript output');
     if (resolve(request.transcript_path) !== resolve(outputDir, 'transcript.jsonl')) throw new AutosError('POLICY', 'Provider transcript must use the private transcript filename');
@@ -262,6 +369,8 @@ export class DockerRunner implements RunnerPort {
     const promptInfo = await stat(prompt);
     if (!promptInfo.isFile() || promptInfo.size > 1_000_000) throw new AutosError('INVALID_INPUT', 'Provider prompt is not a bounded regular file');
     if (signal?.aborted) return { provider: request.provider, role: request.role, status: 'CANCELLED', exit_code: null, elapsed_ms: 0, transcript_path: request.transcript_path, result: null, error_code: 'CANCELLED', ...(request.model ? { model: request.model } : {}) };
+    // Resolve before any container work: an uninstalled toolchain must fail without starting anything.
+    const toolchain = request.toolchain ? await resolveToolchain(this.options.toolchainRoot, request.toolchain) : undefined;
     let rawProfile: unknown;
     try { rawProfile = await this.options.authProfiles?.(request.auth_profile, request.provider); } catch { throw new AutosError('AUTH', 'Provider authentication profile is unavailable'); }
     let profile: ProviderAuthProfile | undefined;
@@ -281,19 +390,23 @@ export class DockerRunner implements RunnerPort {
     }
     const profileEnv = validateEnvironment(request.provider, profile?.env ?? {});
     const cancelled = (): ProviderResult => ({ provider: request.provider, role: request.role, status: 'CANCELLED', exit_code: null, elapsed_ms: 0, transcript_path: request.transcript_path, result: null, error_code: 'CANCELLED', ...(request.model ? { model: request.model } : {}) });
+    const cacheRoot = toolchain && this.options.dependencyCacheRoot ? await canonical(this.options.dependencyCacheRoot) : undefined;
     const launch = async (stagedAuth: string | undefined): Promise<ProviderResult> => {
       const envText = [`AUTOS_JOB_ID=${request.job_id}`, `AUTOS_ISSUE_KEY=${request.issue_key}`, `AUTOS_TIMEOUT_MS=${request.timeout_ms}`, `AUTOS_MAX_PROMPT_BYTES=${this.limits.maxPromptBytes}`, `AUTOS_MAX_TRANSCRIPT_BYTES=${this.limits.maxTranscriptBytes}`, 'HOME=/home/worker', ...(stagedAuth ? ['CODEX_HOME=/run/autos/auth'] : []), profileEnv].filter(Boolean).join('\n');
       const started = performance.now();
       const name = containerName(request.job_id, request.role);
       this.track(request.job_id, name);
       let envPath: string | undefined;
+      let scratch: string | undefined;
       try {
+        if (toolchain) scratch = await this.createScratch();
         const envDir = await mkdtemp(join(this.options.envRoot ?? tmpdir(), 'autos-auth-'));
         envPath = join(envDir, 'provider.env');
         await writeFile(envPath, `${envText}\n`, { mode: 0o600, flag: 'wx' });
         await chmod(envPath, 0o600);
       } catch (error) {
         this.untrack(request.job_id, name);
+        if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
         if (error instanceof AutosError) throw error;
         throw new AutosError('AUTH', 'Provider authentication profile is unavailable');
       }
@@ -306,6 +419,7 @@ export class DockerRunner implements RunnerPort {
         ...mount(prompt, '/run/autos/prompt.txt', 'ro'), ...mount(outputDir, '/run/autos/output', 'rw'),
         // Only the per-run staged Codex login is mounted (read-write so token refresh works); never the profile directory.
         ...(stagedAuth ? mount(stagedAuth, '/run/autos/auth', 'rw') : []),
+        ...(toolchain && scratch ? [...toolchainMounts(toolchain), ...mount(scratch, TOOLCHAIN_MOUNTS.scratch, 'rw'), ...(cacheRoot ? mount(cacheRoot, TOOLCHAIN_MOUNTS.mavenCache, 'ro') : []), ...envArgs(this.roleToolchainEnv(toolchain, request.toolchain!.tomcat !== null, cacheRoot !== undefined))] : []),
         ...(envPath ? ['--env-file', envPath] : []), '--workdir', '/workspace', this.options.workerImage,
         '--provider', request.provider, '--role', request.role,
         ...(request.model ? ['--model', request.model] : []), '--auth-profile', request.auth_profile,
@@ -335,7 +449,7 @@ export class DockerRunner implements RunnerPort {
         return { provider: request.provider, role: request.role, status, exit_code: result.code, elapsed_ms: performance.now() - started, transcript_path: request.transcript_path, result: infrastructure ? { reason: INFRA_REASON } : killed ? { reason: ROLE_OOM_REASON } : null, error_code: errorCode, ...(request.model ? { model: request.model } : {}) };
       } finally {
         try { await this.removeContainer(name); }
-        finally { if (envPath) await rm(dirname(envPath), { recursive: true, force: true }); this.untrack(request.job_id, name); }
+        finally { if (scratch) await rm(scratch, { recursive: true, force: true }).catch(() => undefined); if (envPath) await rm(dirname(envPath), { recursive: true, force: true }); this.untrack(request.job_id, name); }
       }
     };
     if (authDirectory === undefined) return await launch(undefined);
@@ -394,7 +508,7 @@ export class DockerRunner implements RunnerPort {
     } catch { await rm(temporary, { force: true }).catch(() => undefined); }
   }
 
-  async runChecks(workspace: GitWorkspace, candidateDigest: string, commands: CheckCommand[], signal?: AbortSignal): Promise<Checks> {
+  async runChecks(workspace: GitWorkspace, candidateDigest: string, commands: CheckCommand[], signal?: AbortSignal, options?: RunChecksOptions): Promise<Checks> {
     if (!jobIdSchema.safeParse(workspace.job_id).success || !issueKeySchema.safeParse(workspace.issue_key).success || !gitShaSchema.safeParse(workspace.base_sha).success || !branchNameSchema.safeParse(workspace.development_branch).success || !branchNameSchema.safeParse(workspace.feature_branch).success || !digestSchema.safeParse(candidateDigest).success || !Array.isArray(commands) || commands.length === 0 || commands.length > 32) throw new AutosError('INVALID_INPUT', 'Check request is invalid');
     const validatedCommands = commands.map((command) => {
       const parsed = checkCommandSchema.safeParse(command);
@@ -405,6 +519,8 @@ export class DockerRunner implements RunnerPort {
     const workspaceRoot = await canonical(this.options.workspaceRoot);
     const outputRoot = await canonical(this.options.outputRoot);
     await assertDisjoint(workspaceRoot, outputRoot, 'Check source and artifact roots');
+    if (options?.toolchain || this.options.toolchainRoot) await this.assertToolchainRootDisjoint(workspaceRoot, outputRoot);
+    const toolchain = options?.toolchain ? await resolveToolchain(this.options.toolchainRoot, options.toolchain) : undefined;
     if (this.options.dependencyCacheRoot) {
       await Promise.all([assertDisjoint(workspaceRoot, this.options.dependencyCacheRoot, 'Dependency cache'), assertDisjoint(outputRoot, this.options.dependencyCacheRoot, 'Dependency cache')]);
       if (this.options.authRoot) await assertDisjoint(this.options.authRoot, this.options.dependencyCacheRoot, 'Dependency and authentication caches');
@@ -418,6 +534,7 @@ export class DockerRunner implements RunnerPort {
       }
       const scratch = resolve(this.options.outputRoot, '.checks', randomUUID());
       await mkdir(scratch, { recursive: true, mode: 0o700 });
+      await this.handOver(scratch);
       const name = containerName(workspace.job_id, 'checks');
       this.track(workspace.job_id, name);
       const args = [
@@ -425,6 +542,7 @@ export class DockerRunner implements RunnerPort {
         '--user', `${this.options.uid ?? 10001}:${this.options.gid ?? 10001}`, '--memory', this.limits.checkMemory, '--cpus', this.limits.checkCpus, '--pids-limit', String(this.limits.pids),
         '--tmpfs', `/tmp:rw,noexec,nosuid,nodev,size=${this.limits.tmpSize},uid=${this.options.uid ?? 10001},gid=${this.options.gid ?? 10001},mode=1777`, ...mount(source, '/source', 'ro'), ...mount(scratch, '/scratch', 'rw'),
         ...(this.options.dependencyCacheRoot ? mount(await canonical(this.options.dependencyCacheRoot), '/opt/autos/m2/repository', 'ro') : []),
+        ...(toolchain && options?.toolchain ? [...toolchainMounts(toolchain), ...envArgs(this.checksToolchainEnv(toolchain, options.toolchain.tomcat !== null))] : []),
         this.options.checksImage, '--source', '/source', '--scratch', '/scratch', '--timeout-ms', String(command.timeout_ms), '--command-json', JSON.stringify([command.executable, ...command.args]),
       ];
       try {
@@ -440,8 +558,50 @@ export class DockerRunner implements RunnerPort {
         checks.push({ name: `check-${index + 1}`, command: [command.executable, ...command.args], status, exit_code: actualExit, timed_out: timedOut, required: command.required, report_paths: [], ...(excerpt ? { output_excerpt: excerpt } : {}) });
       } finally { try { await this.removeContainer(name); } finally { this.untrack(workspace.job_id, name); await rm(scratch, { recursive: true, force: true }); } }
     }
-    return checksSchema.parse({ schema_version: 1, candidate_digest: candidateDigest, recorded_at: new Date().toISOString(), checks });
+    return checksSchema.parse({ schema_version: 1, candidate_digest: candidateDigest, recorded_at: new Date().toISOString(), checks, ...(toolchain && options?.toolchain ? { toolchain: { jdk: options.toolchain.jdk, tomcat: options.toolchain.tomcat, ...(toolchain.javaVersion ? { java_version: toolchain.javaVersion } : {}) } } : {}) });
   }
+
+  private roleToolchainEnv(resolved: ResolvedToolchain, tomcat: boolean, cache: boolean): [string, string][] {
+    const javaHome = TOOLCHAIN_MOUNTS.jdk;
+    return [
+      ['JAVA_HOME', javaHome],
+      ...(tomcat ? [['CATALINA_HOME', TOOLCHAIN_MOUNTS.tomcat], ['CATALINA_BASE', TOOLCHAIN_MOUNTS.catalinaBase]] as [string, string][] : []),
+      ['PATH', `${javaHome}/bin:${MAVEN_BIN}:${IMAGE_PATH}`],
+      ['MAVEN_ARGS', `-o -Dmaven.repo.local=${TOOLCHAIN_MOUNTS.mavenLocal}${cache ? ` -Dmaven.repo.local.tail=${TOOLCHAIN_MOUNTS.mavenCache} -Dmaven.repo.local.tail.ignoreAvailability=true` : ''}`],
+    ];
+  }
+
+  private checksToolchainEnv(_resolved: ResolvedToolchain, tomcat: boolean): [string, string][] {
+    return [
+      ['JAVA_HOME', TOOLCHAIN_MOUNTS.jdk],
+      ...(tomcat ? [['CATALINA_HOME', TOOLCHAIN_MOUNTS.tomcat]] as [string, string][] : []),
+      ['PATH', `${TOOLCHAIN_MOUNTS.jdk}/bin:${IMAGE_PATH}`],
+    ];
+  }
+
+  /** Per-invocation disk scratch for role containers; the caller removes it. */
+  private async createScratch(): Promise<string> {
+    const parent = resolve(this.options.outputRoot, '.scratch');
+    await mkdir(parent, { recursive: true, mode: 0o700 });
+    const scratch = join(parent, randomUUID());
+    await mkdir(scratch, { mode: 0o700 });
+    try { await this.handOver(scratch); } catch (error) { await rm(scratch, { recursive: true, force: true }).catch(() => undefined); throw error; }
+    return scratch;
+  }
+
+  /** When the supervisor runs as root it hands the private directory to the container user; otherwise the uids must already match. */
+  private async handOver(path: string): Promise<void> {
+    await chmod(path, 0o700);
+    if (process.getuid?.() === 0) await chown(path, this.options.uid ?? 10001, this.options.gid ?? 10001);
+  }
+
+  private async assertToolchainRootDisjoint(workspaceRoot: string, outputRoot: string): Promise<void> {
+    const root = this.options.toolchainRoot;
+    if (!root) return;
+    const others = [workspaceRoot, outputRoot, ...(this.options.authRoot ? [this.options.authRoot] : []), ...(this.options.dependencyCacheRoot ? [this.options.dependencyCacheRoot] : [])];
+    for (const other of others) await assertDisjoint(root, other, 'Toolchain directory');
+  }
+
 
   async stop(jobId: string): Promise<void> {
     if (!jobIdSchema.safeParse(jobId).success) throw new AutosError('INVALID_INPUT', 'Stop request is invalid');
@@ -457,7 +617,8 @@ export class DockerRunner implements RunnerPort {
 
   async health(): Promise<RunnerHealth> {
     const auth = [...(this.options.authSummary ?? [])].map(({ profile, provider, mode }) => ({ profile, provider, mode })).sort((x, y) => x.profile.localeCompare(y.profile) || x.provider.localeCompare(y.provider));
-    const base = { status: 'ready', version: 1, auth, require_subscription: this.options.requireSubscription === true } as const;
+    const toolchains = this.options.toolchainRoot ? await listInstalledToolchains(this.options.toolchainRoot) : undefined;
+    const base = { status: 'ready', version: 1, auth, require_subscription: this.options.requireSubscription === true, ...(toolchains ? { toolchains } : {}) } as const;
     if (this.options.testOnly) return { ...base, docker: 'test-only' };
     const docker = this.options.dockerBinary ?? 'docker';
     const ok = (result: DockerProcessResult) => !result.timedOut && !result.cancelled && !result.outputLimit && result.code === 0;
@@ -489,6 +650,10 @@ export class DockerRunner implements RunnerPort {
     const checksRoot = resolve(this.options.outputRoot, '.checks');
     for (const entry of await readdir(checksRoot).catch(() => [] as string[])) {
       await rm(join(checksRoot, entry), { recursive: true, force: true }).then(() => { scratch += 1; }).catch(() => undefined);
+    }
+    const scratchRoot = resolve(this.options.outputRoot, '.scratch');
+    for (const entry of await readdir(scratchRoot).catch(() => [] as string[])) {
+      await rm(join(scratchRoot, entry), { recursive: true, force: true }).then(() => { scratch += 1; }).catch(() => undefined);
     }
     let envDirs = 0;
     // Test-only runners never touch the shared OS temp dir unless a private envRoot is supplied.
@@ -679,11 +844,17 @@ export async function createSupervisorServer(options: RunnerSupervisorOptions): 
       }
       if (req.url === '/v1/run-checks') {
         record.action = 'run-checks';
-        const value = body as { workspace?: GitWorkspace; candidateDigest?: string; commands?: CheckCommand[] };
+        const value = body as { workspace?: GitWorkspace; candidateDigest?: string; commands?: CheckCommand[]; options?: unknown };
         if (typeof value?.workspace?.job_id === 'string' && jobIdSchema.safeParse(value.workspace.job_id).success) record.job_id = value.workspace.job_id;
         if (!value || typeof value !== 'object' || !value.workspace || typeof value.candidateDigest !== 'string' || !Array.isArray(value.commands)) throw new AutosError('INVALID_INPUT', 'Check request is invalid');
         const workspace = { ...value.workspace, directory: translatePath(value.workspace.directory, clientRoot, hostRoot) };
-        const result = await options.runner.runChecks(workspace, value.candidateDigest, value.commands, cancellation.signal);
+        let toolchainOption: ToolchainSelection | undefined;
+        if (value.options !== undefined) {
+          const raw = value.options as Record<string, unknown> | null;
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some((key) => key !== 'toolchain')) throw new AutosError('INVALID_INPUT', 'Check request is invalid');
+          if (raw.toolchain !== undefined) { const parsedToolchain = toolchainSelectionSchema.safeParse(raw.toolchain); if (!parsedToolchain.success) throw new AutosError('INVALID_INPUT', 'Check request is invalid'); toolchainOption = parsedToolchain.data; }
+        }
+        const result = await options.runner.runChecks(workspace, value.candidateDigest, value.commands, cancellation.signal, toolchainOption ? { toolchain: toolchainOption } : undefined);
         record.status = result.checks.some((check) => check.status === 'FAIL') ? 'FAIL' : result.checks.some((check) => check.status === 'NOT_RUN') ? 'NOT_RUN' : 'PASS';
         res.end(safeJson(result)); return;
       }
@@ -779,6 +950,11 @@ export class DockerRunnerClient implements RunnerPort {
       if (typeof value.require_subscription !== 'boolean') throw new AutosError('TOOL', 'Runner supervisor returned invalid health data');
       health.require_subscription = value.require_subscription;
     }
+    if (value.toolchains !== undefined) {
+      const parsed = installedToolchainsSchema.safeParse(value.toolchains);
+      if (!parsed.success) throw new AutosError('TOOL', 'Runner supervisor returned invalid health data');
+      health.toolchains = parsed.data;
+    }
     return health;
   }
   async runRole(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> {
@@ -794,10 +970,10 @@ export class DockerRunnerClient implements RunnerPort {
       return { provider: parsed.provider, role: parsed.role, status, exit_code: null, elapsed_ms: parsed.timeout_ms, transcript_path: parsed.transcript_path, result: null, error_code: error.code, ...(parsed.model === undefined ? {} : { model: parsed.model }) };
     }
   }
-  async runChecks(workspace: GitWorkspace, candidateDigest: string, commands: CheckCommand[], signal?: AbortSignal): Promise<Checks> {
+  async runChecks(workspace: GitWorkspace, candidateDigest: string, commands: CheckCommand[], signal?: AbortSignal, options?: RunChecksOptions): Promise<Checks> {
     const parsedCommands = commands.map((command) => checkCommandSchema.parse(command));
     try {
-      const response = checksSchema.parse(await this.call('/v1/run-checks', { workspace, candidateDigest, commands: parsedCommands }, signal, parsedCommands.reduce((total, command) => total + command.timeout_ms, 60_000)));
+      const response = checksSchema.parse(await this.call('/v1/run-checks', { workspace, candidateDigest, commands: parsedCommands, ...(options?.toolchain ? { options: { toolchain: toolchainSelectionSchema.parse(options.toolchain) } } : {}) }, signal, parsedCommands.reduce((total, command) => total + command.timeout_ms, 60_000)));
       if (response.candidate_digest !== candidateDigest) throw new AutosError('INVALID_OUTPUT', 'Runner supervisor returned mismatched check evidence');
       return response;
     } catch (error) {
@@ -817,4 +993,14 @@ function isAuthSummary(value: unknown): value is ProviderAuthSummary {
 export function assertRunnerPaths(options: Pick<DockerRunnerOptions, 'workspaceRoot' | 'promptRoot' | 'outputRoot'>): void {
   if ([options.workspaceRoot, options.promptRoot, options.outputRoot].some((path) => !isAbsolute(path))) throw new AutosError('INVALID_CONFIG', 'Runner roots must be absolute paths');
   if (resolve(options.workspaceRoot) === resolve(options.promptRoot) || resolve(options.workspaceRoot) === resolve(options.outputRoot)) throw new AutosError('INVALID_CONFIG', 'Runner workspace and artifact roots must be distinct');
+}
+
+/** Early, lexical refusal of overlapping roots; the per-run check repeats it on canonical paths. */
+function assertToolchainRootDisjointLexically(options: DockerRunnerOptions): void {
+  if (options.toolchainRoot === undefined) return;
+  if (!isAbsolute(options.toolchainRoot)) throw new AutosError('INVALID_CONFIG', 'Toolchain root must be an absolute path');
+  const root = resolve(options.toolchainRoot);
+  for (const other of [options.workspaceRoot, options.outputRoot, options.promptRoot, options.authRoot, options.dependencyCacheRoot]) {
+    if (other !== undefined && isAbsolute(other) && (isInside(root, resolve(other)) || isInside(resolve(other), root))) throw new AutosError('INVALID_CONFIG', 'Toolchain root must be disjoint from job data, authentication and cache roots');
+  }
 }

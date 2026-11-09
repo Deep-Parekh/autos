@@ -337,7 +337,7 @@ const statusResponseSchema = {
       version: { type: 'string' }, started_at: { type: 'string', format: 'date-time' }, uptime_s: { type: 'integer', minimum: 0 }, poll_interval_s: { type: 'integer', minimum: 1 },
       poll_loop: { type: 'object', additionalProperties: false, properties: { running: { type: 'boolean' }, next_poll_at: nullableString, consecutive_failures: { type: 'integer', minimum: 0 }, auto_poll: { type: 'boolean', description: 'jira.auto_poll; when false the controller never reads the Jira filter and only runs submitted jobs.' }, last_discovery_at: { ...nullableString, description: 'Completion time of the last successful Jira discovery.' } }, required: ['running', 'next_poll_at', 'consecutive_failures', 'auto_poll', 'last_discovery_at'] },
     }, required: ['version', 'started_at', 'uptime_s', 'poll_interval_s', 'poll_loop'] },
-    runner: { type: 'object', additionalProperties: false, properties: { status: { type: 'string', enum: ['ready', 'unknown', 'unreachable'] }, version: { type: 'integer' }, docker: { type: 'string', enum: ['available', 'unavailable', 'test-only'] } }, required: ['status'] },
+    runner: { type: 'object', additionalProperties: false, properties: { status: { type: 'string', enum: ['ready', 'unknown', 'unreachable'] }, version: { type: 'integer' }, docker: { type: 'string', enum: ['available', 'unavailable', 'test-only'] }, toolchains: { type: 'object', additionalProperties: false, properties: { jdk: { type: 'array', items: { type: 'string' } }, tomcat: { type: 'array', items: { type: 'string' } } }, required: ['jdk', 'tomcat'] } }, required: ['status'] },
     activity: activitySchema,
     active_elapsed_s: { type: 'integer', minimum: 0 },
     stage_elapsed_s: { type: 'integer', minimum: 0 },

@@ -14,7 +14,7 @@ for name in AUTOS_WORKER_IMAGE AUTOS_CHECKS_IMAGE AUTOS_PROVIDER_PROFILES_FILE; 
   [[ -n "${!name:-}" ]] || fail "$name is not set (copy .env.example to .env)"
 done
 # Empty optional values would otherwise reach the supervisor as "" (e.g. a blank UID becomes 0 and is rejected).
-for name in AUTOS_RUNNER_UID AUTOS_RUNNER_GID AUTOS_CLIENT_ROOT AUTOS_MAVEN_CACHE_ROOT AUTOS_PROVIDER_NETWORK AUTOS_PROVIDER_NETWORK_APPROVED; do
+for name in AUTOS_RUNNER_UID AUTOS_RUNNER_GID AUTOS_CLIENT_ROOT AUTOS_MAVEN_CACHE_ROOT AUTOS_TOOLCHAIN_ROOT AUTOS_PROVIDER_NETWORK AUTOS_PROVIDER_NETWORK_APPROVED; do
   if [[ -z "${!name:-}" ]]; then unset "$name"; fi
 done
 if [[ -n "${AUTOS_RUNNER_UID:-}" && "${AUTOS_RUNNER_UID}" == "0" ]]; then fail "AUTOS_RUNNER_UID must be a non-root uid (id -u autos)"; fi
@@ -34,6 +34,14 @@ fi
 if [[ -n "${AUTOS_MAVEN_CACHE_ROOT:-}" ]]; then
   [[ -d "$AUTOS_MAVEN_CACHE_ROOT" ]] || fail "$AUTOS_MAVEN_CACHE_ROOT does not exist (see docs/local-pilot.md step 5)"
 fi
+# JDK/Tomcat toolchains (scripts/install-toolchains.ts). Defaults to ~/.autos/toolchains when that folder exists.
+if [[ -z "${AUTOS_TOOLCHAIN_ROOT:-}" && -d "$HOME/.autos/toolchains" ]]; then export AUTOS_TOOLCHAIN_ROOT="$HOME/.autos/toolchains"; fi
+if [[ -n "${AUTOS_TOOLCHAIN_ROOT:-}" ]]; then
+  [[ -d "$AUTOS_TOOLCHAIN_ROOT" ]] || fail "$AUTOS_TOOLCHAIN_ROOT does not exist (run scripts/install-toolchains.ts, see docs/local-pilot.md)"
+  case "$(cd "$AUTOS_TOOLCHAIN_ROOT" && pwd -P)" in
+    "$ROOT"|"$ROOT"/*) fail "keep AUTOS_TOOLCHAIN_ROOT outside the project directory";;
+  esac
+fi
 
 mkdir -p data artifacts workspaces
 chmod 700 data artifacts workspaces
@@ -49,5 +57,5 @@ export AUTOS_HOST_ROOT="$ROOT"
 export AUTOS_CLIENT_ROOT="${AUTOS_CLIENT_ROOT:-$ROOT}"
 rm -f "$AUTOS_SUPERVISOR_SOCKET"
 
-echo "pilot-supervisor: listening on $AUTOS_SUPERVISOR_SOCKET (worker=$AUTOS_WORKER_IMAGE, network=${AUTOS_PROVIDER_NETWORK:-none})"
+echo "pilot-supervisor: listening on $AUTOS_SUPERVISOR_SOCKET (worker=$AUTOS_WORKER_IMAGE, network=${AUTOS_PROVIDER_NETWORK:-none}, toolchains=${AUTOS_TOOLCHAIN_ROOT:-none})"
 exec node docker/supervisor/start.mjs

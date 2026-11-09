@@ -74,12 +74,15 @@ jobs:
 
 build_profiles:
   pilot-java:
-    jdk: '17'
+    # jdk: '21'        # optional fallback when the branch map's JDK column is blank (the branch map wins)
+    # tomcat: 11.0.24  # optional fallback for the branch map's Tomcat column
     checks:
       # Checks run in autos-checks:local with NO network: Maven must run offline against the
       # preloaded cache mounted from AUTOS_MAVEN_CACHE_ROOT.
       - executable: mvn
-        args: [-o, --batch-mode, -Dmaven.repo.local=/opt/autos/m2/repository, test]
+        # Offline against the preloaded cache; the tracking flag lets Maven use artifacts cached through your mirror/Archiva ids.
+        # Add repository-specific flags here, e.g. -Dmaven.gitcommitid.skip=true (checks build a copy without .git).
+        args: [-o, --batch-mode, -Dmaven.repo.local=/opt/autos/m2/repository, -Daether.enhancedLocalRepository.trackingFilename=.autos-untracked, test]
         timeout_ms: 1200000
         required: true
 

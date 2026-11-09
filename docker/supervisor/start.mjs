@@ -58,6 +58,11 @@ const workerImage = required('AUTOS_WORKER_IMAGE');
 const checksImage = required('AUTOS_CHECKS_IMAGE');
 const profilesFile = required('AUTOS_PROVIDER_PROFILES_FILE', { absolute: true });
 const mavenCache = optionalPath('AUTOS_MAVEN_CACHE_ROOT');
+const toolchainRoot = optionalPath('AUTOS_TOOLCHAIN_ROOT');
+if (toolchainRoot) {
+  const info = await stat(toolchainRoot).catch(() => undefined);
+  if (!info?.isDirectory()) problems.push('AUTOS_TOOLCHAIN_ROOT must be an existing directory');
+}
 const hostRoot = optionalPath('AUTOS_HOST_ROOT') ?? process.cwd();
 const clientRoot = optionalPath('AUTOS_CLIENT_ROOT') ?? '/app';
 const uid = integer('AUTOS_RUNNER_UID', process.getuid?.() ?? 10001, { min: 1, max: 4_294_967_294 });
@@ -117,6 +122,7 @@ try {
     workspaceRoot,
     authRoot,
     ...(mavenCache ? { dependencyCacheRoot: mavenCache } : {}),
+    ...(toolchainRoot ? { toolchainRoot } : {}),
     promptRoot: outputRoot,
     outputRoot,
     uid,

@@ -1,7 +1,7 @@
 import { parseFragment } from 'parse5';
 import { z } from 'zod';
 import {
-  AutosError, issueSnapshotSchema, parseConfig, projectMappingSchema, precedentResultSchema, savedFilterSchema,
+  AutosError, parseJdkCell, parseTomcatCell, issueSnapshotSchema, parseConfig, projectMappingSchema, precedentResultSchema, savedFilterSchema,
   type AtlassianReadPort, type AutosConfig, type IssueSnapshot, type PrecedentReadPort,
   type PrecedentResult, type ProjectMapping, type SavedFilter,
 } from '@autos/contracts';
@@ -160,6 +160,7 @@ function parseBranchMap(html: string, pageId: string, version: number, fetchedAt
   const root = parseFragment(html) as unknown as HtmlNode;
   const tables = descend(root, 'table');
   const expected = ['project key', 'bitbucket workspace', 'repository slug', 'development branch', 'sandbox branch', 'enabled'];
+  const allowedHeaders = [...expected, 'jdk', 'tomcat'];
   const matches = tables.filter((table) => {
     const firstRow = descend(table, 'tr')[0];
     if (!firstRow) return false;
@@ -171,7 +172,7 @@ function parseBranchMap(html: string, pageId: string, version: number, fetchedAt
   const rows = descend(matches[0]!, 'tr');
   const headerCells = (rows[0]!.childNodes ?? []).filter((node) => node.nodeName === 'th' || node.nodeName === 'td');
   const headers = headerCells.map((cell) => normalizeCellText(cell).trim().toLowerCase().replace(/\s+/g, ' '));
-  if (new Set(headers).size !== headers.length || headers.some((header) => !expected.includes(header))) throw safeError('MAPPING', 'Branch map has duplicate or unsupported columns');
+  if (new Set(headers).size !== headers.length || headers.some((header) => !allowedHeaders.includes(header))) throw safeError('MAPPING', 'Branch map has duplicate or unsupported columns');
   const projectColumn = headers.indexOf('project key');
   const candidates = new Map<string, ProjectMapping[]>();
   const problems = new Map<string, string>();
@@ -192,10 +193,14 @@ function parseBranchMap(html: string, pageId: string, version: number, fetchedAt
     const repositorySlug = value('repository slug');
     const exactAllowed = config.bitbucket.allowed_repositories.filter((repository) => repository.workspace === workspace && repository.repository_slug === repositorySlug);
     if (exactAllowed.length !== 1) { problem(project, 'Branch map repository for this project is not an exact configured allowlist entry'); continue; }
+    const jdk = parseJdkCell(value('jdk'));
+    if (jdk === undefined) { problem(project, 'Branch map JDK value for this project is not recognized (use a major version such as 21)'); continue; }
+    const tomcat = parseTomcatCell(value('tomcat'));
+    if (tomcat === undefined) { problem(project, 'Branch map Tomcat value for this project is not recognized (use a full version such as 11.0.24)'); continue; }
     const parsed = projectMappingSchema.safeParse({
       project_key: project, workspace, repository_slug: repositorySlug,
       development_branch: value('development branch'), sandbox_branch: value('sandbox branch') || null,
-      enabled, source: { page_id: pageId, version, fetched_at: fetchedAt.toISOString() },
+      enabled, jdk, tomcat, source: { page_id: pageId, version, fetched_at: fetchedAt.toISOString() },
     });
     if (!parsed.success) { problem(project, 'Branch map row for this project is invalid'); continue; }
     candidates.set(project, [...(candidates.get(project) ?? []), parsed.data]);

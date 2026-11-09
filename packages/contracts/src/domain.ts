@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { jdkVersionSchema, tomcatVersionSchema } from './toolchain.js';
 
 export const SCHEMA_VERSION = 1 as const;
 export const PROVIDERS = ['claude', 'codex', 'cursor'] as const;
@@ -53,6 +54,9 @@ export const projectMappingSchema = z.strictObject({
   development_branch: branchNameSchema,
   sandbox_branch: branchNameSchema.nullable(),
   enabled: z.boolean(),
+  /** Optional branch-map JDK major / Tomcat version; null or absent falls back to the build profile. */
+  jdk: jdkVersionSchema.nullable().optional(),
+  tomcat: tomcatVersionSchema.nullable().optional(),
   source: z.strictObject({ page_id: z.string().regex(/^[0-9]+$/), version: z.number().int().positive(), fetched_at: timestampSchema }),
 });
 export type ProjectMapping = z.infer<typeof projectMappingSchema>;

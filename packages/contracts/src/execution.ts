@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { isAbsolute } from 'node:path';
 import { ERROR_CODES } from './errors.js';
+import { toolchainSelectionSchema } from './toolchain.js';
 import { identifierSchema, issueKeySchema, jobIdSchema, modelSchema, providerSchema, roleSchema } from './domain.js';
 
 const localPath = z.string().min(1).refine((path) => isAbsolute(path) && !/[\x00\r\n]/.test(path), 'Expected an absolute local path');
@@ -8,6 +9,7 @@ export const providerRequestSchema = z.strictObject({
   job_id: jobIdSchema, issue_key: issueKeySchema, provider: providerSchema, role: roleSchema,
   model: modelSchema.optional(), cwd: localPath, prompt_path: localPath, transcript_path: localPath,
   timeout_ms: z.number().int().positive().max(3_600_000), source_access: z.enum(['read', 'write']), auth_profile: identifierSchema,
+  toolchain: toolchainSelectionSchema.optional(),
 }).refine((request) => request.role === 'swe' || request.source_access === 'read', 'QA and reviewer require source-read access');
 
 export const providerResultSchema = z.strictObject({

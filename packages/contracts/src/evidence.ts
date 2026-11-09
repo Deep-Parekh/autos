@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { jdkVersionSchema, tomcatVersionSchema } from './toolchain.js';
 import { digestSchema, gitShaSchema, issueKeySchema, jobIdSchema, jobStateSchema, relativePathSchema, timestampSchema } from './domain.js';
 
 export const checkRecordSchema = z.strictObject({
@@ -7,7 +8,9 @@ export const checkRecordSchema = z.strictObject({
   timed_out: z.boolean(), required: z.boolean(), report_paths: z.array(relativePathSchema),
   output_excerpt: z.string().max(12_000).optional(),
 }).refine((check) => check.status !== 'PASS' || (check.exit_code === 0 && !check.timed_out), 'Passing checks require a successful process exit');
-export const checksSchema = z.strictObject({ schema_version: z.literal(1), candidate_digest: digestSchema, recorded_at: timestampSchema, checks: z.array(checkRecordSchema).min(1) });
+/** Toolchain the checks ran with (null: the checks image's built-in JDK). java_version is read by trusted code from the JDK's release file. */
+export const checkToolchainSchema = z.strictObject({ jdk: jdkVersionSchema, tomcat: tomcatVersionSchema.nullable(), java_version: z.string().regex(/^[0-9][0-9A-Za-z.+_-]{0,63}$/).optional() });
+export const checksSchema = z.strictObject({ schema_version: z.literal(1), candidate_digest: digestSchema, recorded_at: timestampSchema, checks: z.array(checkRecordSchema).min(1), toolchain: checkToolchainSchema.nullable().optional() });
 export const qaSchema = z.strictObject({ schema_version: z.literal(1), candidate_digest: digestSchema, status: z.enum(['PASS', 'FAIL', 'NOT_RUN']), evidence: z.array(z.string().min(1)).min(1) });
 export const reviewFindingSchema = z.strictObject({ severity: z.enum(['BLOCKER', 'HIGH', 'MEDIUM', 'LOW']), file: relativePathSchema, line: z.number().int().positive(), issue: z.string().min(1), suggested_fix: z.string().min(1) });
 export const reviewSchema = z.strictObject({ schema_version: z.literal(1), candidate_digest: digestSchema, status: z.enum(['PASS', 'FAIL', 'NOT_RUN']), findings: z.array(reviewFindingSchema) })
