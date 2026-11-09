@@ -1197,7 +1197,7 @@ export class WorkflowService implements WorkflowServicePort {
       await stage('IMPLEMENTING');
     }
   }
-  private eligible(projectKey: string, type: string): boolean { return this.deps.config.jira.allowed_projects.includes(projectKey) && this.deps.config.jira.intake_types.includes(type); }
+  private eligible(projectKey: string, type: string): boolean { const types = this.deps.config.jira.intake_types; return this.deps.config.jira.allowed_projects.includes(projectKey) && (types === undefined || types.includes(type)); }
   private async precedentText(issue: Parameters<WorkflowDependencies['precedents']['findPrecedents']>[0], mapping: Parameters<WorkflowDependencies['precedents']['findPrecedents']>[1], signal?: AbortSignal): Promise<string> {
     const result = await this.deps.precedents.findPrecedents(issue, mapping, signal); return result.outcome === 'FOUND' ? result.items.map((p) => `## ${p.issue_key}\n${p.reason}\n${p.evidence_url}\n\n${p.diff}`).join('\n\n') : `# Precedents\n\n${result.outcome}${result.disabled_reason ? ` (${result.disabled_reason})` : ''}.`;
   }

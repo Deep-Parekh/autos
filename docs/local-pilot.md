@@ -158,7 +158,7 @@ Each ticket still gets its own workspace, branch and short-lived containers, so 
 | --- | --- |
 | `AUTH` on dry-run | Wrong Atlassian email/token, or the account cannot read the private filter |
 | `MAPPING` | Zero or several enabled branch-map rows for the project, or a repository not in `allowed_repositories` |
-| `POLICY` | Issue type or project outside `intake_types`/`allowed_projects`, or a change outside `allowed_paths` |
+| `POLICY` | Project outside `allowed_projects`, issue type outside `intake_types` (only if you set it), or a change outside `allowed_paths` |
 | Smoke test `FAIL (AUTH)` | Login missing, expired or revoked in the profile (re-run `claude setup-token` / `codex login`), or the profile name does not match `auth_profile` |
 | Supervisor exits with a profile error | A profile lacks `mode`, mixes an API key into a subscription entry, or is not `subscription` while `AUTOS_REQUIRE_SUBSCRIPTION=true` |
 | Smoke test `FAIL (TOOL)` with network errors | `AUTOS_PROVIDER_NETWORK` unset, or the network does not exist |

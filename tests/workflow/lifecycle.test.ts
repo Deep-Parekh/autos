@@ -96,6 +96,25 @@ const open = (script: Script, file = 'jobs.sqlite') => {
 const readJson = async (jobId: string, name: string) => JSON.parse(await readFile(join(config.storage.artifacts_dir, jobId, name), 'utf8')) as Record<string, any>;
 
 describe('poll semantics: one job at a time, queue drains within a poll', () => {
+  it('with intake_types set, other issue types in the filter are POLICY-blocked', async () => {
+    const script = newScript(['SAMPLE-1', 'SAMPLE-2']);
+    script.issues.set('SAMPLE-2', issue('SAMPLE-2', { issue_type: 'Task' }));
+    const { store, service } = open(script);
+    await service.poll();
+    const byKey = new Map((await store.list(10)).map((j) => [j.issue_key, j]));
+    assert.equal(byKey.get('SAMPLE-1')?.state, 'READY_FOR_HUMAN');
+    assert.equal(byKey.get('SAMPLE-2')?.state, 'BLOCKED'); assert.equal(byKey.get('SAMPLE-2')?.blocked_code, 'POLICY');
+  });
+  it('without intake_types every issue type in the filter is eligible', async () => {
+    delete (config.jira as { intake_types?: string[] }).intake_types;
+    const script = newScript(['SAMPLE-1', 'SAMPLE-2']);
+    script.issues.set('SAMPLE-2', issue('SAMPLE-2', { issue_type: 'Task' }));
+    const { store, service } = open(script);
+    await service.poll();
+    const byKey = new Map((await store.list(10)).map((j) => [j.issue_key, j]));
+    assert.equal(byKey.get('SAMPLE-1')?.state, 'READY_FOR_HUMAN');
+    assert.equal(byKey.get('SAMPLE-2')?.state, 'READY_FOR_HUMAN');
+  });
   it('discovers, dedupes, drains all eligible tickets serially, and a blocked ticket does not stop the queue', async () => {
     const script = newScript(['SAMPLE-1', 'SAMPLE-2', 'SAMPLE-3', 'OTHER-9', 'SAMPLE-5']);
     script.issues.set('OTHER-9', issue('OTHER-9', { project_key: 'OTHER' })); // disallowed project

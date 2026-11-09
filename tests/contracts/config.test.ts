@@ -81,3 +81,11 @@ test('role fallback chains are ordered, distinct, and Cursor is auto-only', () =
     assert.throws(() => parseConfig(bad), (error: unknown) => error instanceof AutosError && error.code === 'INVALID_CONFIG');
   }
 });
+
+test('intake_types is optional: absent means every issue type in the saved filter', () => {
+  const config = example();
+  assert.deepEqual(config.jira.intake_types, ['Bug']);
+  const raw = structuredClone(config) as Record<string, any>;
+  delete raw.jira.intake_types;
+  assert.equal(parseConfig(raw).jira.intake_types, undefined);
+});

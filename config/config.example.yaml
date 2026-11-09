@@ -5,7 +5,7 @@ jira:
   site_url: https://example.atlassian.net
   saved_filter_id: '12345'
   allowed_projects: [SAMPLE]
-  intake_types: [Bug]
+  intake_types: [Bug]                                 # optional: omit to accept every issue type in the saved filter
   # Jira custom field IDs, if your site stores acceptance criteria separately.
   acceptance_criteria_fields: []
   read_only: true

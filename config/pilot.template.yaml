@@ -9,7 +9,7 @@ jira:
   site_url: https://REPLACE_ME.atlassian.net        # Cloud site root only: https, no path
   saved_filter_id: 'REPLACE_ME'                       # numeric ID from the filter URL (...?filter=12345)
   allowed_projects: [REPLACE_ME]                      # e.g. [WTS]; must match Confluence branch-map rows
-  intake_types: [Bug]
+  # intake_types: [Bug]                              # optional: only these issue types; omit to accept every issue in the filter
   acceptance_criteria_fields: []                      # e.g. [customfield_10050] if criteria live in a custom field
   read_only: true
   poll_seconds: 60                                    # lower for local testing; 300 for steady state

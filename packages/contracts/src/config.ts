@@ -62,7 +62,8 @@ export const configSchema = z.strictObject({
   schema_version: z.literal(1),
   jira: z.strictObject({
     site_url: siteUrlSchema, saved_filter_id: z.string().regex(/^[0-9]+$/),
-    allowed_projects: z.array(projectKeySchema).min(1), intake_types: z.array(z.string().min(1)).min(1).default(['Bug']),
+    allowed_projects: z.array(projectKeySchema).min(1), /** Optional extra restriction on issue type. Absent: every issue in the saved filter is eligible (the filter decides). */
+    intake_types: z.array(z.string().min(1)).min(1).optional(),
     acceptance_criteria_fields: z.array(z.string().regex(/^customfield_[0-9]+$/)).default([]),
     read_only: z.literal(true), poll_seconds: z.number().int().min(10).default(300),
     /**
