@@ -9,6 +9,7 @@ import type { OperatorNoteRequest, WorkflowServicePort } from '@autos/contracts'
 import type { ControllerOptions, LoopStatus, ProviderDiagnostic, StatusResponse } from '@autos/controller';
 import { pollDelayMs, runControllerLoop, waitForSignalOrTimeout, type LoopSleep } from './loop.js';
 import { deepChecks, formatChecks, type CheckResult, type DeepDoctorDeps } from './deep-doctor.js';
+import { buildTeamsMessage, cursorPath, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, readCursor, TierTracker, writeCursor, type FetchLike } from './teams.js';
 
 export interface CliRuntime extends Omit<ControllerOptions, 'operatorToken' | 'fastifyOptions' | 'bindHost'> {
   testProviders(): Promise<ProviderDiagnostic[]>;
@@ -36,6 +37,9 @@ export interface CliDependencies {
   prompt?(question: string): Promise<string>;
   /** Test seam: clock for workspace ages. */
   now?(): number;
+  /** Test seams for `autos teams`: the webhook HTTP client and the delivery retry base delay. */
+  teamsFetch?: FetchLike;
+  teamsRetryDelayMs?: number;
 }
 
 export { pollDelayMs };
@@ -98,6 +102,9 @@ Commands:
   queue list [--limit N]          List recent jobs
   status [--url URL]              Show live controller, runner, and job activity (needs running controller)
   watch [--job JOB_ID] [--url URL]  Follow progress events live (Ctrl-C to stop)
+  teams relay [--from-start] [--url URL]  Post READY_FOR_HUMAN/BLOCKED/PAUSED/... cards to Teams (notifications.teams;
+                                  needs running controller; resumes after the last posted event; Ctrl-C to stop)
+  teams test                      Post one test card to the configured Teams webhook
   events [--job JOB_ID] [--after N] [--limit N] [--url URL]  List persisted progress events
   controller start                Run the local API and polling loop
   docs validate                   Check generated OpenAPI against docs/openapi.yaml
@@ -480,6 +487,89 @@ async function watchEvents(base: URL, token: string, options: MonitorOptions, js
       attempts++;
       stderr(JSON.stringify({ event: 'watch_reconnecting', attempt: attempts, last_event_id: cursor ?? null }));
       await waitForSignalOrTimeout(abort.signal, delay ?? Math.min(1000 * 2 ** Math.min(attempts - 1, 4), 10_000));
+    }
+    return 0;
+  } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); external?.removeEventListener('abort', stop); }
+}
+
+// ---- Teams notifications (phase 1: one-way, outbound only) ----
+
+const teamsUsage = 'Usage: autos teams relay [--from-start] [--url URL] | autos teams test';
+async function teamsCommand(args: string[], config: AutosConfig, json: boolean, dependencies: CliDependencies, stdout: (text: string) => void, stderr: (text: string) => void): Promise<number> {
+  const teams = config.notifications?.teams;
+  if (!teams) throw new AutosError('INVALID_CONFIG', 'notifications.teams is not configured (see docs/teams.md)');
+  const env = dependencies.env ?? process.env;
+  const webhook = parseTeamsWebhookUrl(env[teams.webhook_url_env], teams.webhook_url_env);
+  const delivery = { ...(dependencies.teamsFetch ? { fetch: dependencies.teamsFetch } : {}), ...(dependencies.teamsRetryDelayMs !== undefined ? { retryDelayMs: dependencies.teamsRetryDelayMs } : {}) };
+  if (args[0] === 'test' && args.length === 1) {
+    const at = new Date(dependencies.now?.() ?? Date.now()).toISOString();
+    const payload = buildTeamsMessage({ event_id: 1, at, type: 'job_finished', job_id: null, issue_key: null, state: 'PLANNED' }, 'PLANNED', {}, config);
+    // A test card names no issue: replace the title so it reads as a connectivity check.
+    const content = (payload.attachments as Array<{ content: { body: Array<{ text?: string }> } }>)[0]!.content;
+    content.body[0]!.text = '🔔 Autos Teams notifications are connected'; content.body.splice(2);
+    const result = await postTeamsMessage(webhook, payload, delivery);
+    report(json ? { delivered: result.ok, status: result.status } : result.ok ? `Test card delivered (HTTP ${result.status}).` : `Test card was not delivered (${result.status === null ? 'network error' : `HTTP ${result.status}`}).`, json, stdout);
+    return result.ok ? 0 : 1;
+  }
+  if (args[0] !== 'relay') throw new AutosError('INVALID_INPUT', teamsUsage);
+  const { flags, values } = parseFlags(args.slice(1), { bool: ['--from-start'], value: ['--url'] }, teamsUsage);
+  const token = operatorToken(config, dependencies); const base = controllerBase(config, values.get('--url'));
+  const cursorFile = cursorPath(resolve(dependencies.cwd ?? process.cwd(), config.storage.data_dir));
+  // Resume after the last processed event; a first start begins at "now" (no replay of history) unless --from-start.
+  let cursor = flags.has('--from-start') ? 0 : await readCursor(cursorFile);
+  if (cursor === null) {
+    const status = await controllerJson(endpoint(base, '/v1/status'), token);
+    const last = isRecord(status) && isRecord(status.activity) && Number.isSafeInteger(status.activity.last_event_id) ? status.activity.last_event_id as number : 0;
+    cursor = last; await writeCursor(cursorFile, cursor);
+  }
+  const wanted = new Set(teams.notify); const tiers = new TierTracker();
+  const abort = new AbortController(); const stop = () => abort.abort(); const external = dependencies.signal;
+  if (external) { if (external.aborted) abort.abort(); else external.addEventListener('abort', stop, { once: true }); }
+  else { process.once('SIGINT', stop); process.once('SIGTERM', stop); }
+  const log = (record: Record<string, unknown>) => stderr(JSON.stringify(record));
+  log({ event: 'teams_relay_started', after: cursor, notify: [...wanted] });
+  const handle = async (event: JobEvent): Promise<void> => {
+    tiers.observe(event);
+    const kind = notificationKind(event);
+    if (kind && wanted.has(kind)) {
+      let job: JobRecord | null = null;
+      if (event.job_id && kind !== 'PROVIDER_GATE') {
+        try { const parsedJob = jobRecordSchema.safeParse(await controllerJson(endpoint(base, `/v1/jobs/${event.job_id}`), token, { signal: abort.signal })); job = parsedJob.success ? parsedJob.data as JobRecord : null; }
+        catch (error) { if (abort.signal.aborted) throw error; job = null; } // the card still goes out with the event's own facts
+      }
+      const result = await postTeamsMessage(webhook, buildTeamsMessage(event, kind, { job, tier: tiers.get(event.job_id) }, config), { ...delivery, signal: abort.signal });
+      // At-least-once while the relay runs; a card that still fails after retries is logged and skipped so one bad
+      // delivery cannot stall every later notification.
+      log(result.ok ? { event: 'teams_notified', kind, issue_key: event.issue_key, event_id: event.event_id } : { event: 'teams_delivery_failed', kind, issue_key: event.issue_key, event_id: event.event_id, status: result.status });
+    }
+    if (event.type === 'job_finished') tiers.forget(event.job_id);
+    cursor = event.event_id; await writeCursor(cursorFile, cursor);
+  };
+  let attempts = 0; let everConnected = false;
+  try {
+    while (!abort.signal.aborted) {
+      try {
+        const response = await controllerFetch(endpoint(base, '/v1/events/stream', { after: cursor }), token, { signal: abort.signal, headers: { accept: 'text/event-stream', 'last-event-id': String(cursor) } });
+        if (!response.body) throw unreachable();
+        everConnected = true; attempts = 0;
+        const pending: JobEvent[] = [];
+        const parse = createSseParser((message) => {
+          let value: unknown; try { value = JSON.parse(message.data); } catch { return; }
+          const event = jobEventSchema.safeParse(value); if (event.success && event.data.event_id > (cursor ?? 0)) pending.push(event.data);
+        });
+        const decoder = new TextDecoder();
+        for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+          parse(decoder.decode(chunk, { stream: true }));
+          while (pending.length) await handle(pending.shift()!);
+        }
+      } catch (error) {
+        if (abort.signal.aborted) break;
+        if (error instanceof AutosError && (error.code !== 'UPSTREAM' || !everConnected)) throw error;
+      }
+      if (abort.signal.aborted) break;
+      attempts++;
+      log({ event: 'teams_relay_reconnecting', attempt: attempts, last_event_id: cursor });
+      await waitForSignalOrTimeout(abort.signal, dependencies.reconnectDelayMs ?? Math.min(1000 * 2 ** Math.min(attempts - 1, 4), 10_000));
     }
     return 0;
   } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); external?.removeEventListener('abort', stop); }
@@ -1077,6 +1167,7 @@ export async function main(args: string[], dependencies: CliDependencies = {}): 
     if ((commandArgs[0] === 'status' || commandArgs[0] === 'watch' || commandArgs[0] === 'events')) {
       return await monitorCommand(commandArgs, config, parsed.json, dependencies, stdout, stderr);
     }
+    if (commandArgs[0] === 'teams') return await teamsCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout, stderr);
     if (commandArgs[0] === 'export') return await exportCommand(commandArgs.slice(1), config, dependencies, stdout, stderr);
     if (commandArgs[0] === 'revise') return await reviseCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout, stderr);
     if (commandArgs[0] === 'close') return await closeCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout);

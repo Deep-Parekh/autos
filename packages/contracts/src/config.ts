@@ -168,6 +168,27 @@ function resolveRole(role: RoleInput, tiers: Record<string, ResolvedChainEntry[]
 
 const binarySchema = z.strictObject({ binary: z.string().min(1), auth_profile: identifierSchema });
 
+/**
+ * What `autos teams relay` posts to Teams: finished attempts by outcome, pauses for provider limits, model-tier
+ * escalations, and the new-ticket provider gate.
+ */
+export const TEAMS_NOTIFY_KINDS = ['READY_FOR_HUMAN', 'BLOCKED', 'CANCELLED', 'PLANNED', 'PAUSED', 'TIER_ESCALATED', 'PROVIDER_GATE'] as const;
+export type TeamsNotifyKind = typeof TEAMS_NOTIFY_KINDS[number];
+const notificationsSchema = z.strictObject({
+  /**
+   * Teams notifications through a Workflows webhook ("Post to a channel when a webhook request is received").
+   * The webhook URL carries a signature, so it is a secret: it lives in the environment variable named here, never in
+   * this file, and is never logged. Cards carry issue keys, states, codes, branch/commit and Autos' own short reasons;
+   * never ticket text, operator notes, diffs or provider output.
+   */
+  teams: z.strictObject({
+    webhook_url_env: envNameSchema,
+    notify: z.array(z.enum(TEAMS_NOTIFY_KINDS)).min(1).default(['READY_FOR_HUMAN', 'BLOCKED', 'PAUSED']),
+    /** Add copyable `autos …` follow-up commands (show, revise, close, retry) to each card. */
+    include_commands: z.boolean().default(true),
+  }).optional(),
+});
+
 const configObjectSchema = z.strictObject({
   schema_version: z.literal(1),
   jira: z.strictObject({
@@ -234,6 +255,8 @@ const configObjectSchema = z.strictObject({
   security: z.strictObject({ allow_jira_write: z.literal(false), allow_confluence_write: z.literal(false), allow_merge: z.literal(false), allow_deploy: z.literal(false), allow_prod_db: z.literal(false) }),
   storage: z.strictObject({ data_dir: z.string().min(1), artifacts_dir: z.string().min(1), workspaces_dir: z.string().min(1) }),
   api: z.strictObject({ listen_host: z.enum(['127.0.0.1', '::1']), port: z.number().int().min(1024).max(65535), operator_token_env: envNameSchema }),
+  /** Optional outbound notifications (see notificationsSchema). */
+  notifications: notificationsSchema.optional(),
 });
 /**
  * Per-section schemas of the configuration file (input form). A parsed AutosConfig is the resolved output (tier ladders
