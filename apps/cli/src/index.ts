@@ -4,7 +4,7 @@ import { delimiter, dirname, isAbsolute, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseDocument } from 'yaml';
 import { z } from 'zod';
-import { AutosError, DATASET_OUTCOMES, type DatasetExportOptions, closeIssueResultSchema, ERROR_CODES, issueClosureSchema, jobEventSchema, MAX_TICKET_NOTES, ticketNotesSummarySchema, ticketNoteSchema, type TicketNote, type TicketNotesSummary, jobRecordSchema, operatorNoteRequestSchema, parseConfigYaml, pruneWorkspacesResultSchema, workspaceEntrySchema, type AutosConfig, type CloseIssueResult, type IssueClosure, type JobEvent, type JobRecord, type PruneWorkspacesResult, type WorkspaceEntry } from '@autos/contracts';
+import { AutosError, DATASET_OUTCOMES, EFFORT_LEVELS, effortSchema, formatTierStep, parseTierStep, tierPinResultSchema, tierPinSchema, type TierPin, type TierPinResult, type TierStepRef, type DatasetExportOptions, closeIssueResultSchema, ERROR_CODES, issueClosureSchema, jobEventSchema, MAX_TICKET_NOTES, ticketNotesSummarySchema, ticketNoteSchema, type TicketNote, type TicketNotesSummary, jobRecordSchema, operatorNoteRequestSchema, parseConfigYaml, pruneWorkspacesResultSchema, workspaceEntrySchema, type AutosConfig, type CloseIssueResult, type IssueClosure, type JobEvent, type JobRecord, type PruneWorkspacesResult, type WorkspaceEntry } from '@autos/contracts';
 import type { OperatorNoteRequest, WorkflowServicePort } from '@autos/contracts';
 import type { ControllerOptions, LoopStatus, ProviderDiagnostic, StatusResponse } from '@autos/controller';
 import { pollDelayMs, runControllerLoop, waitForSignalOrTimeout, type LoopSleep } from './loop.js';
@@ -55,25 +55,35 @@ Commands:
   providers test --all            Run explicit read-only provider smoke tests
   run ISSUE-123 [--dry-run] [--note TEXT]...  Queue and wait for one issue (non-zero unless READY_FOR_HUMAN/PLANNED);
                                   --note (repeatable, max 5) gives operator guidance to the SWE
-  revise JOB_ID|ISSUE-123 --note TEXT [--note-file PATH] [--roles swe,qa,reviewer] [--wait] [--url URL]
+  revise JOB_ID|ISSUE-123 --note TEXT [--note-file PATH] [--roles swe,qa,reviewer] [--tier TIER[:EFFORT]]
+         [--effort LEVEL] [--wait] [--url URL]
                                   Request changes on a READY_FOR_HUMAN job (or an issue's latest one) via the running
-                                  controller; continues from the reviewed commit. --wait follows the new job (exit 0
-                                  only on READY_FOR_HUMAN)
+                                  controller; continues from the reviewed commit. SWE starts at the step that finished
+                                  the previous attempt unless --tier (this revision only) or a ticket pin says otherwise.
+                                  --wait follows the new job (exit 0 only on READY_FOR_HUMAN)
   close ISSUE-123 --merged|--abandoned [--note TEXT] [--dry-run] [--yes] [--url URL]
                                   Finish an issue after manual review (irreversible): records your MERGED/ABANDONED
                                   assertion and removes ALL its workspaces; artifacts are kept. Jira/Bitbucket are not
                                   changed and the merge is not verified. Asks to confirm on a terminal unless --yes
-  show ISSUE-123 [--url URL]      Show an issue's closure, attempts and ticket notes (needs running controller)
+  show ISSUE-123 [--url URL]      Show an issue's closure, attempts, ticket notes and tier pins (needs running controller)
   note ISSUE-123 --note TEXT [--roles swe,qa,reviewer] | --swe TEXT | --qa TEXT | --reviewer TEXT | --all TEXT
-                 | --note-file PATH [--hold] [--url URL]
+                 | --note-file PATH [--hold] [--tier TIER[:EFFORT] [--effort LEVEL]] [--url URL]
                                   Store guidance for an issue key, even before Autos has seen the issue; it applies to
                                   every attempt of that issue until removed. Each flag is a separate note and all are
                                   repeatable (max ${MAX_TICKET_NOTES} notes per issue). --roles applies to the --note/--note-file flags that
-                                  follow it (default swe); --all targets swe, qa and reviewer. --hold also holds the issue
+                                  follow it (default swe); --all targets swe, qa and reviewer. --hold also holds the issue;
+                                  --tier also pins the SWE starting tier (as autos tier; may be used without notes)
   note ISSUE-123 --list | --remove NOTE_ID | --clear | --hold | --release [--url URL]
                                   Manage notes and the hold (a held issue is not queued by automatic discovery)
-  notes [ISSUE-123] [--url URL]   List every issue with notes or a hold and whether Autos has worked on it;
-                                  with a key, show that issue's notes in full
+  notes [ISSUE-123] [--url URL]   List every issue with notes, a hold or tier pins and whether Autos has worked on it;
+                                  with a key, show that issue's notes and pins in full
+  tier ISSUE-123 TIER[:EFFORT] [--effort LEVEL] [--role swe|qa|reviewer] [--url URL]
+                                  Pin a role's starting model tier (default swe) for every later attempt of the issue,
+                                  even before Autos has seen it, until cleared; never below the role's floor (min).
+                                  --effort (or TIER:EFFORT) overrides the effort of every Claude/Codex entry of the tier.
+                                  A tier outside the role's ladder is a fixed step without escalation
+  tier ISSUE-123 [--clear [--role ROLE]] [--url URL]
+                                  List the issue's tier pins, or clear them (one role or all)
   workspaces [--sizes] [--url URL]  List workspace directories with age, size and the retention decision
   export dataset [--out FILE] [--since ISO] [--issue KEY] [--outcome LIST] [--no-prompts] [--no-transcripts]
                                   Write the per-attempt dataset (JSON lines: tickets, prompts, transcripts, checks, QA/review,
@@ -227,7 +237,7 @@ function schemaOptions(config: AutosConfig): ControllerOptions {
   const unavailable = async (): Promise<never> => { throw new Error('Schema generation does not execute services'); };
   return {
     config, operatorToken: 'schema-generation-placeholder-token', providers: async () => [], projects: async () => [], testProviders: async () => [], close: async () => undefined,
-    workflow: { submit: unavailable, retry: unavailable, revise: unavailable, reviseIssue: unavailable, closeIssue: unavailable, addTicketNote: unavailable, removeTicketNotes: unavailable, setTicketHold: unavailable, ticketNotes: unavailable, closure: unavailable, workspaces: unavailable, pruneWorkspaces: unavailable, execute: unavailable, cancel: unavailable, get: async () => null, list: async () => [], poll: async () => undefined, discover: async () => ({ discovered: 0, queued: 0 }), drain: async () => undefined, events: async () => [], subscribe: () => () => undefined, activity: unavailable },
+    workflow: { submit: unavailable, retry: unavailable, revise: unavailable, reviseIssue: unavailable, closeIssue: unavailable, addTicketNote: unavailable, removeTicketNotes: unavailable, setTicketHold: unavailable, ticketNotes: unavailable, setTierPin: unavailable, clearTierPins: unavailable, tierPins: unavailable, closure: unavailable, workspaces: unavailable, pruneWorkspaces: unavailable, execute: unavailable, cancel: unavailable, get: async () => null, list: async () => [], poll: async () => undefined, discover: async () => ({ discovered: 0, queued: 0 }), drain: async () => undefined, events: async () => [], subscribe: () => () => undefined, activity: unavailable },
     artifacts: { write: async () => undefined, prepareRole: unavailable, manifest: unavailable },
   };
 }
@@ -306,11 +316,23 @@ function httpFailure(status: number): AutosError {
   return new AutosError('UPSTREAM', `Controller returned HTTP ${status}`);
 }
 
-async function controllerFetch(url: URL, token: string, init: { signal?: AbortSignal; headers?: Record<string, string>; method?: string; body?: string } = {}): Promise<Response> {
+/**
+ * `reason`: on HTTP 400, show the controller's own error message (used where the controller explains the refusal, e.g. an
+ * unknown tier or a step below the floor). The message is controller-authored; it is length-capped and stripped of control
+ * characters, and any other status still maps to the generic failures.
+ */
+async function controllerFetch(url: URL, token: string, init: { signal?: AbortSignal; headers?: Record<string, string>; method?: string; body?: string; reason?: boolean } = {}): Promise<Response> {
   let response: Response;
   try { response = await fetch(url, { signal: init.signal ?? null, method: init.method ?? 'GET', ...(init.body !== undefined ? { body: init.body } : {}), headers: { authorization: `Bearer ${token}`, ...init.headers } }); }
   catch (error) { if (init.signal?.aborted) throw error; throw unreachable(); }
-  if (!response.ok) { await response.body?.cancel().catch(() => undefined); throw httpFailure(response.status); }
+  if (!response.ok) {
+    if (init.reason && response.status === 400) {
+      const body: unknown = await response.json().catch(() => null);
+      const message = isRecord(body) && typeof body.message === 'string' ? body.message.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 300) : '';
+      if (message) throw new AutosError('INVALID_INPUT', `Controller rejected the request: ${message}`);
+    } else await response.body?.cancel().catch(() => undefined);
+    throw httpFailure(response.status);
+  }
   return response;
 }
 
@@ -524,13 +546,28 @@ async function readNoteFile(value: string, dependencies: CliDependencies): Promi
   return validNote(text);
 }
 
-const reviseUsage = 'Usage: autos revise JOB_ID|ISSUE-123 --note TEXT [--note-file PATH] [--roles swe,qa,reviewer] [--wait] [--url URL]';
+const reviseUsage = 'Usage: autos revise JOB_ID|ISSUE-123 --note TEXT [--note-file PATH] [--roles swe,qa,reviewer] [--tier TIER[:EFFORT]] [--effort LEVEL] [--wait] [--url URL]';
+
+/** `--tier TIER[:EFFORT]` plus an optional `--effort LEVEL` (syntax only; the controller checks the tier and floor). */
+function parseTierFlags(tier: string | undefined, effort: string | undefined, usage: string): TierStepRef | undefined {
+  if (tier === undefined) {
+    if (effort !== undefined) throw new AutosError('INVALID_INPUT', `--effort requires --tier. ${usage}`);
+    return undefined;
+  }
+  const ref = parseTierStep(tier);
+  if (!ref) throw new AutosError('INVALID_INPUT', `Tier must be TIER or TIER:EFFORT (a model_tiers name; the effort overrides every Claude/Codex entry of the tier; one of ${EFFORT_LEVELS.join(', ')}). ${usage}`);
+  if (effort === undefined) return ref;
+  if (ref.effort !== undefined) throw new AutosError('INVALID_INPUT', `Give the effort either as TIER:EFFORT or with --effort, not both. ${usage}`);
+  const level = effortSchema.safeParse(effort);
+  if (!level.success) throw new AutosError('INVALID_INPUT', `--effort must be one of ${EFFORT_LEVELS.join(', ')}`);
+  return { tier: ref.tier, effort: level.data };
+}
 
 async function reviseCommand(args: string[], config: AutosConfig, json: boolean, dependencies: CliDependencies, stdout: (text: string) => void, stderr: (text: string) => void): Promise<number> {
   const target = args[0];
   const byIssue = target !== undefined && ISSUE_KEY.test(target);
   if (!target || (!byIssue && !UUID.test(target))) throw new AutosError('INVALID_INPUT', reviseUsage);
-  const texts: string[] = []; let roles: string[] | undefined; let wait = false; let url: string | undefined;
+  const texts: string[] = []; let roles: string[] | undefined; let wait = false; let url: string | undefined; let tierArg: string | undefined; let effortArg: string | undefined;
   for (let index = 1; index < args.length; index++) {
     const flag = args[index]!;
     if (flag === '--wait') { wait = true; continue; }
@@ -540,16 +577,20 @@ async function reviseCommand(args: string[], config: AutosConfig, json: boolean,
     else if (flag === '--note-file') texts.push(await readNoteFile(value, dependencies));
     else if (flag === '--roles') roles = parseRoles(value);
     else if (flag === '--url') url = value;
+    else if (flag === '--tier' && tierArg === undefined) tierArg = value;
+    else if (flag === '--effort' && effortArg === undefined) effortArg = value;
     else throw new AutosError('INVALID_INPUT', reviseUsage);
   }
   if (texts.length === 0) throw new AutosError('INVALID_INPUT', reviseUsage);
+  const pin = parseTierFlags(tierArg, effortArg, reviseUsage);
   const instructions = validNote(texts.join('\n\n'));
   const body = operatorNoteRequestSchema.safeParse({ instructions, ...(roles ? { roles } : {}) });
   if (!body.success) throw new AutosError('INVALID_INPUT', reviseUsage);
+  const payload = { ...body.data, ...(pin ? { tier: pin.tier, ...(pin.effort ? { effort: pin.effort } : {}) } : {}) };
   const token = (dependencies.env ?? process.env)[config.api.operator_token_env] ?? '';
   if (!token) throw new AutosError('INVALID_CONFIG', `Operator token environment variable ${config.api.operator_token_env} must be set to call the controller`);
   const base = controllerBase(config, url);
-  const created = await controllerJson(endpoint(base, byIssue ? `/v1/issues/${target}/revisions` : `/v1/jobs/${target}/revisions`), token, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body.data) });
+  const created = await controllerJson(endpoint(base, byIssue ? `/v1/issues/${target}/revisions` : `/v1/jobs/${target}/revisions`), token, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload), reason: pin !== undefined });
   if (!isRecord(created) || typeof created.job_id !== 'string' || !UUID.test(created.job_id)) throw new AutosError('UPSTREAM', 'Controller returned an unexpected revision response');
   const newId = created.job_id;
   if (!wait) { report(created, json, stdout); return 0; }
@@ -653,7 +694,7 @@ export function formatPrune(result: PruneWorkspacesResult): string {
 }
 export function formatIssue(detail: { issue_key: string; closure: IssueClosure | null; ticket_notes?: TicketNotesSummary | undefined; jobs: Array<Pick<JobRecord, 'job_id' | 'state' | 'dry_run' | 'updated_at'> & { revision?: number | undefined; closed_as?: string | undefined; feature_branch?: string | undefined; commit_sha?: string | undefined; resume_at?: string | undefined; pause_code?: string | undefined; paused_role?: string | undefined }> }): string {
   const lines = detail.closure ? formatClosure(detail.closure) : [`${detail.issue_key} is open (not closed)`];
-  const ticket = detail.ticket_notes && (detail.ticket_notes.notes.length > 0 || detail.ticket_notes.held) ? ['', ...formatTicketDetail(detail.ticket_notes, 'Ticket notes')] : [];
+  const ticket = detail.ticket_notes && (detail.ticket_notes.notes.length > 0 || detail.ticket_notes.held || detail.ticket_notes.tier_pins.length > 0) ? ['', ...formatTicketDetail(detail.ticket_notes, 'Ticket notes')] : [];
   if (detail.jobs.length === 0) return [...lines, 'No attempts.', ...ticket].join('\n');
   const paused = detail.jobs.filter((job) => job.state === 'PAUSED').map((job) => `Paused ${job.job_id}: every ${job.paused_role ?? 'role'} provider limited (${job.pause_code ?? 'RATE_LIMIT'}); resumes at ${job.resume_at ?? 'unknown'} with the same workspace and base (cancel with autos jobs cancel)`);
   return [...lines, '', ...table(['JOB', 'STATE', 'REV', 'DRY', 'BRANCH', 'COMMIT', 'UPDATED'], detail.jobs.map((job) => [job.job_id, stateLabel(job.state, job.closed_as), String(job.revision ?? 0), job.dry_run ? 'yes' : 'no', job.feature_branch ?? '-', job.commit_sha?.slice(0, 12) ?? '-', job.updated_at])), ...paused, ...ticket].join('\n');
@@ -746,10 +787,21 @@ function seenByAutos(entry: TicketNotesSummary): boolean { return entry.attempts
 function currentNotesUsed(entry: TicketNotesSummary): string {
   return !seenByAutos(entry) || entry.notes.length === 0 ? 'n/a' : entry.attempts_with_current_notes > 0 ? 'yes' : 'no';
 }
+/** A pin's step label, e.g. `med:xhigh` (`med` when its entries keep their configured effort). */
+export function tierPinLabel(pin: Pick<TierPin, 'tier' | 'effort'>): string {
+  return formatTierStep({ tier: pin.tier, ...(pin.effort ? { effort: pin.effort } : {}) });
+}
+/** Pins in one cell, e.g. `swe=med:xhigh qa=lg`; `-` when none. */
+function tierPinsSummary(pins: TierPin[]): string {
+  return pins.length === 0 ? '-' : pins.map((pin) => `${pin.role}=${tierPinLabel(pin)}`).join(' ');
+}
+export function formatTierPins(pins: TierPin[]): string[] {
+  return pins.map((pin) => `  ${pin.role}: ${tierPinLabel(pin)} by ${pin.author} at ${pin.created_at}`);
+}
 export function formatTicketNotesTable(entries: TicketNotesSummary[], now = Date.now()): string[] {
-  if (entries.length === 0) return ['No issues with ticket notes or a hold.'];
-  return table(['KEY', 'NOTES', 'HELD', 'STATUS', 'ATTEMPTS', 'LATEST', 'CURRENT NOTES USED'], entries.map((entry) => [
-    entry.issue_key, rolesSummary(entry.notes), entry.held ? 'yes' : 'no', NOTE_STATUS_LABELS[entry.status],
+  if (entries.length === 0) return ['No issues with ticket notes, a hold or tier pins.'];
+  return table(['KEY', 'NOTES', 'HELD', 'TIER', 'STATUS', 'ATTEMPTS', 'LATEST', 'CURRENT NOTES USED'], entries.map((entry) => [
+    entry.issue_key, rolesSummary(entry.notes), entry.held ? 'yes' : 'no', tierPinsSummary(entry.tier_pins), NOTE_STATUS_LABELS[entry.status],
     `${entry.attempts}${entry.dry_runs > 0 ? ` (+${entry.dry_runs} dry)` : ''}`,
     entry.latest_state ? `${entry.latest_state}${entry.last_activity_at ? ` ${formatAge(entry.last_activity_at, now)} ago` : ''}` : '-',
     currentNotesUsed(entry),
@@ -767,10 +819,11 @@ export function formatTicketDetail(entry: TicketNotesSummary, title?: string, no
       for (const line of note.instructions.split(/\r?\n/)) lines.push(`    ${line}`);
     }
   }
+  if (entry.tier_pins.length > 0) lines.push('Tier pins (starting step of each later attempt until cleared; never below the floor):', ...formatTierPins(entry.tier_pins));
   return lines;
 }
 
-const noteUsage = 'Usage: autos note ISSUE-123 [--roles swe,qa,reviewer] --note TEXT | --swe TEXT | --qa TEXT | --reviewer TEXT | --all TEXT | --note-file PATH (repeatable, --roles before the notes it applies to) [--hold] [--url URL] | autos note ISSUE-123 --list | --remove NOTE_ID | --clear | --hold | --release [--url URL]';
+const noteUsage = 'Usage: autos note ISSUE-123 [--roles swe,qa,reviewer] --note TEXT | --swe TEXT | --qa TEXT | --reviewer TEXT | --all TEXT | --note-file PATH (repeatable, --roles before the notes it applies to) [--hold] [--tier TIER[:EFFORT] [--effort LEVEL]] [--url URL] | autos note ISSUE-123 --list | --remove NOTE_ID | --clear | --hold | --release [--url URL]';
 const SHORTHAND_ROLES: Record<string, Array<(typeof NOTE_ROLES)[number]>> = { '--swe': ['swe'], '--qa': ['qa'], '--reviewer': ['reviewer'], '--all': ['swe', 'qa', 'reviewer'] };
 
 async function noteCommand(args: string[], config: AutosConfig, json: boolean, dependencies: CliDependencies, stdout: (text: string) => void): Promise<number> {
@@ -781,17 +834,20 @@ async function noteCommand(args: string[], config: AutosConfig, json: boolean, d
   const adds: Array<{ instructions: string; roles: Array<(typeof NOTE_ROLES)[number]> }> = [];
   let currentRoles: Array<(typeof NOTE_ROLES)[number]> = ['swe']; let pendingRoles = false;
   let list = false; let clear = false; let hold = false; let release = false; let remove: string | undefined; let url: string | undefined;
+  let tierArg: string | undefined; let effortArg: string | undefined;
   for (let index = 1; index < args.length; index++) {
     const flag = args[index]!;
     if (flag === '--list' && !list) list = true;
     else if (flag === '--clear' && !clear) clear = true;
     else if (flag === '--hold' && !hold) hold = true;
     else if (flag === '--release' && !release) release = true;
-    else if (['--remove', '--url', '--roles', '--note', '--note-file', ...Object.keys(SHORTHAND_ROLES)].includes(flag)) {
+    else if (['--remove', '--url', '--roles', '--note', '--note-file', '--tier', '--effort', ...Object.keys(SHORTHAND_ROLES)].includes(flag)) {
       const value = args[++index];
       if (value === undefined) throw new AutosError('INVALID_INPUT', noteUsage);
       if (flag === '--remove' && remove === undefined) { if (!UUID.test(value)) throw new AutosError('INVALID_INPUT', '--remove requires a note id (see autos note KEY --list)'); remove = value; }
       else if (flag === '--url' && url === undefined) url = value;
+      else if (flag === '--tier' && tierArg === undefined) tierArg = value;
+      else if (flag === '--effort' && effortArg === undefined) effortArg = value;
       else if (flag === '--roles') { currentRoles = parseRoles(value); pendingRoles = true; }
       else if (flag === '--note') { adds.push({ instructions: validNote(value), roles: currentRoles }); pendingRoles = false; }
       else if (flag === '--note-file') { adds.push({ instructions: await readNoteFile(value, dependencies), roles: currentRoles }); pendingRoles = false; }
@@ -800,10 +856,11 @@ async function noteCommand(args: string[], config: AutosConfig, json: boolean, d
     } else throw new AutosError('INVALID_INPUT', noteUsage);
   }
   if (pendingRoles) throw new AutosError('INVALID_INPUT', `--roles applies to the --note or --note-file that follows it; none follows. ${noteUsage}`);
+  const pin = parseTierFlags(tierArg, effortArg, noteUsage);
   const manage = [list, clear, release, remove !== undefined].filter(Boolean).length;
-  if (manage > 1 || (manage === 1 && (adds.length > 0 || hold))) throw new AutosError('INVALID_INPUT', `--list, --remove, --clear and --release cannot be combined with each other or with adding notes (only --hold can accompany new notes). ${noteUsage}`);
+  if (manage > 1 || (manage === 1 && (adds.length > 0 || hold || pin))) throw new AutosError('INVALID_INPUT', `--list, --remove, --clear and --release cannot be combined with each other or with adding notes (only --hold and --tier can accompany new notes). ${noteUsage}`);
   if (hold && release) throw new AutosError('INVALID_INPUT', `--hold and --release cannot be combined. ${noteUsage}`);
-  if (manage === 0 && !hold && adds.length === 0) throw new AutosError('INVALID_INPUT', noteUsage);
+  if (manage === 0 && !hold && !pin && adds.length === 0) throw new AutosError('INVALID_INPUT', noteUsage);
   if (adds.length > MAX_TICKET_NOTES) throw new AutosError('INVALID_INPUT', `At most ${MAX_TICKET_NOTES} notes can be stored for one issue`);
   const token = operatorToken(config, dependencies);
   const base = controllerBase(config, url);
@@ -835,12 +892,62 @@ async function noteCommand(args: string[], config: AutosConfig, json: boolean, d
     if (!isRecord(body) || typeof body.held !== 'boolean') throw new AutosError('UPSTREAM', 'Controller returned an unexpected hold response');
     held = body.held;
   }
-  if (json) { report({ issue_key: issueKey, notes: stored, ...(stored.length ? { jira } : {}), ...(held !== undefined ? { held } : {}) }, true, stdout); return 0; }
+  const tier = pin ? await putTierPin(base, token, issueKey, { role: 'swe', ...pin }) : undefined;
+  if (json) { report({ issue_key: issueKey, notes: stored, ...(stored.length ? { jira } : {}), ...(held !== undefined ? { held } : {}), ...(tier ? { tier } : {}) }, true, stdout); return 0; }
   if (stored.length) {
     stdout(jira === 'not_found' ? `WARN ${issueKey} is not in Jira yet \u2014 note kept; check the key for typos. Autos applies the notes when the issue appears.` : jira === 'found' ? `Jira: ${issueKey} found.` : 'Jira: not checked.');
     stdout(`These notes apply to every attempt of ${issueKey} (including retries and revisions) until removed with autos note ${issueKey} --remove NOTE_ID or --clear.`);
   }
   if (held) stdout(`${issueKey} held: automatic discovery will not queue it until \`autos note ${issueKey} --release\`.`);
+  if (tier) for (const line of formatTierPinResult(issueKey, tier)) stdout(line);
+  return 0;
+}
+
+// ---- Model-tier pins: a role's starting step for every later attempt of an issue key ----
+
+async function putTierPin(base: URL, token: string, issueKey: string, pin: { role: (typeof NOTE_ROLES)[number] } & TierStepRef): Promise<TierPinResult> {
+  const body = await controllerJson(endpoint(base, `/v1/issues/${issueKey}/tier`), token, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ role: pin.role, tier: pin.tier, ...(pin.effort ? { effort: pin.effort } : {}) }), reason: true });
+  return parseResponse(tierPinResultSchema, body, 'tier pin');
+}
+export function formatTierPinResult(issueKey: string, result: TierPinResult): string[] {
+  return [
+    `Pinned ${result.pin.role} of ${issueKey} to ${result.step} (${result.in_ladder ? 'in the ladder; escalation continues to the next tier' : 'fixed step: not in the role\'s ladder, no escalation'})`,
+    `Applies when each later attempt of ${issueKey} is picked up (attempts already running keep their step) until \`autos tier ${issueKey} --clear\`; a revision's --tier still wins for that revision.`,
+  ];
+}
+
+const tierUsage = 'Usage: autos tier ISSUE-123 TIER[:EFFORT] [--effort LEVEL] [--role swe|qa|reviewer] [--url URL] | autos tier ISSUE-123 --clear [--role swe|qa|reviewer] [--url URL] | autos tier ISSUE-123 [--url URL]';
+async function tierCommand(args: string[], config: AutosConfig, json: boolean, dependencies: CliDependencies, stdout: (text: string) => void): Promise<number> {
+  const issueKey = args[0];
+  if (!issueKey || !ISSUE_KEY.test(issueKey)) throw new AutosError('INVALID_INPUT', tierUsage);
+  const step = args[1] !== undefined && !args[1].startsWith('--') ? args[1] : undefined;
+  const { flags, values } = parseFlags(args.slice(step === undefined ? 1 : 2), { bool: ['--clear'], value: ['--effort', '--role', '--url'] }, tierUsage);
+  const roleArg = values.get('--role');
+  if (roleArg !== undefined && !(NOTE_ROLES as readonly string[]).includes(roleArg)) throw new AutosError('INVALID_INPUT', '--role must be one of swe, qa, reviewer');
+  const role = roleArg as (typeof NOTE_ROLES)[number] | undefined;
+  const clear = flags.has('--clear');
+  if (clear && (step !== undefined || values.has('--effort'))) throw new AutosError('INVALID_INPUT', `--clear takes no tier or --effort. ${tierUsage}`);
+  if (!clear && step === undefined && (role !== undefined || values.has('--effort'))) throw new AutosError('INVALID_INPUT', `--role and --effort need a tier (or --clear for --role). ${tierUsage}`);
+  const pin = step === undefined ? undefined : parseTierFlags(step, values.get('--effort'), tierUsage);
+  const token = operatorToken(config, dependencies);
+  const base = controllerBase(config, values.get('--url'));
+  const path = `/v1/issues/${issueKey}/tier`;
+  if (clear) {
+    const body = await controllerJson(endpoint(base, path, { role }), token, { method: 'DELETE' });
+    if (!isRecord(body) || typeof body.removed !== 'number') throw new AutosError('UPSTREAM', 'Controller returned an unexpected tier pin response');
+    report(json ? body : `Removed ${body.removed} tier pin${body.removed === 1 ? '' : 's'}${role ? ` (${role})` : ''} from ${issueKey}. Later attempts start from the usual step; attempts already picked up keep theirs.`, json, stdout);
+    return 0;
+  }
+  if (pin) {
+    const result = await putTierPin(base, token, issueKey, { role: role ?? 'swe', ...pin });
+    if (json) report(result, true, stdout);
+    else for (const line of formatTierPinResult(issueKey, result)) stdout(line);
+    return 0;
+  }
+  const body = await controllerJson(endpoint(base, path), token);
+  const pins = parseResponse(tierPinSchema.array(), isRecord(body) ? body.pins : undefined, 'tier pin');
+  if (json) report({ pins }, true, stdout);
+  else stdout(pins.length === 0 ? `No tier pins for ${issueKey}.` : [`Tier pins for ${issueKey} (starting step of each later attempt until cleared; never below the floor):`, ...formatTierPins(pins)].join('\n'));
   return 0;
 }
 
@@ -974,6 +1081,7 @@ export async function main(args: string[], dependencies: CliDependencies = {}): 
     if (commandArgs[0] === 'revise') return await reviseCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout, stderr);
     if (commandArgs[0] === 'close') return await closeCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout);
     if (commandArgs[0] === 'note') return await noteCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout);
+    if (commandArgs[0] === 'tier') return await tierCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout);
     if (commandArgs[0] === 'notes') return await notesCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout);
     if (commandArgs[0] === 'show') return await showCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout);
     if (commandArgs[0] === 'workspaces') return await workspacesCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout);

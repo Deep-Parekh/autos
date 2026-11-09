@@ -1,11 +1,11 @@
-import type { AutosConfig, CheckCommand, RepositoryConfig } from './config.js';
+import type { AutosConfig, CheckCommand, Effort, RepositoryConfig } from './config.js';
 import type { AgentRole, IssueSnapshot, JobState, PrecedentResult, ProjectMapping, Provider, SavedFilter } from './domain.js';
 import type { AutosError, ErrorCode } from './errors.js';
 import type { ArtifactManifest, Checks } from './evidence.js';
 import type { ProviderAuthSummary } from './execution.js';
 import type { ProviderCall } from './dataset.js';
 import type { InstalledToolchains, ToolchainSelection } from './toolchain.js';
-import type { CloseIssueRequest, CloseIssueResult, IssueClosure, IssueResolution, JobEvent, OperatorNoteRequest, PruneWorkspacesRequest, PruneWorkspacesResult, TicketNote, TicketNotesSummary, WorkflowActivity, WorkspaceEntry } from './jobs.js';
+import type { CloseIssueRequest, CloseIssueResult, IssueClosure, IssueResolution, JobEvent, OperatorNoteRequest, PruneWorkspacesRequest, PruneWorkspacesResult, TicketNote, TicketNotesSummary, TierPin, TierPinRequest, TierPinResult, WorkflowActivity, WorkspaceEntry } from './jobs.js';
 
 export interface AtlassianReadPort {
   getSavedFilter(filterId: string, signal?: AbortSignal): Promise<SavedFilter>;
@@ -103,6 +103,8 @@ export interface ProviderRequest {
   timeout_ms: number; source_access: 'read' | 'write'; auth_profile: string;
   /** JDK/Tomcat to mount read-only into the role container; absent means none. */
   toolchain?: ToolchainSelection | undefined;
+  /** Reasoning effort for this call (validated per provider); absent = the CLI's default. */
+  effort?: Effort;
 }
 export interface ProviderResult {
   provider: Provider; role: AgentRole; status: 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT';
@@ -187,9 +189,18 @@ export interface WorkflowServicePort {
    * After human review, queue a revision of a READY_FOR_HUMAN job with operator notes. Only the latest
    * READY_FOR_HUMAN attempt of the issue may be revised, and only when no other attempt for it is active.
    */
-  revise(jobId: string, note: OperatorNoteRequest, author: string): Promise<JobRecord>;
+  revise(jobId: string, note: OperatorNoteRequest, author: string, pin?: Omit<TierPinRequest, 'role'>): Promise<JobRecord>;
   /** revise() for the latest READY_FOR_HUMAN attempt of an issue (404 when none, 409 when closed or active). */
-  reviseIssue(issueKey: string, note: OperatorNoteRequest, author: string): Promise<JobRecord>;
+  reviseIssue(issueKey: string, note: OperatorNoteRequest, author: string, pin?: Omit<TierPinRequest, 'role'>): Promise<JobRecord>;
+  /**
+   * Pin a role's starting model tier/effort for an issue key (whether or not Autos has seen it); applied when an attempt
+   * is picked up, until cleared. Validated against model_tiers and the role's ladder floor (400 when invalid).
+   */
+  setTierPin(issueKey: string, pin: TierPinRequest, author: string): Promise<TierPinResult>;
+  /** Remove one role's pin, or all pins of the issue; returns how many were removed. */
+  clearTierPins(issueKey: string, role?: AgentRole): Promise<number>;
+  /** Current pins of an issue. */
+  tierPins(issueKey: string): Promise<TierPin[]>;
   /**
    * Operator closure after manual review: records MERGED/ABANDONED, removes every workspace of the issue, keeps
    * artifacts, and refuses later submit/revise/retry for it. Refuses (409) while any attempt of the issue is active;

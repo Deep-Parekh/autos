@@ -120,7 +120,7 @@ export async function* exportDataset(input: { config: AutosConfig; options: Data
         final_state: state, blocked_code: str(job.blocked_code), created_at: String(job.created_at), updated_at: String(job.updated_at),
         outcome, feedback, operator_notes: notesOf(db, jobId),
         issue: await json('issue.json'), rounds: await json('rounds.json'), checks: await json('checks.json'), baseline_checks: await json('baseline-checks.json'),
-        qa: await json('qa.json'), review: await json('review.json'),
+        qa: await json('qa.json'), review: await json('review.json'), tiers: await json('tiers.json'),
         instructions: await text('effective-instructions.md'), precedents: await text('precedents.md'), final_diff: await text('changes.patch'),
         calls: dirOk ? await callsOf(join(jobDir, '_private'), { prompts: options.include_prompts, transcripts: options.include_transcripts }) : [],
         timeline,

@@ -11,7 +11,7 @@ export function makeEvent(id: number, extra: Partial<JobEvent> = {}): JobEvent {
 }
 
 /** In-memory events/subscribe/activity for the WorkflowServicePort. */
-export function monitorPort(initial: JobEvent[] = []): Pick<WorkflowServicePort, 'events' | 'subscribe' | 'activity' | 'discover' | 'drain' | 'reviseIssue' | 'closeIssue' | 'closure' | 'workspaces' | 'pruneWorkspaces' | 'addTicketNote' | 'removeTicketNotes' | 'setTicketHold' | 'ticketNotes'> & {
+export function monitorPort(initial: JobEvent[] = []): Pick<WorkflowServicePort, 'events' | 'subscribe' | 'activity' | 'discover' | 'drain' | 'reviseIssue' | 'closeIssue' | 'closure' | 'workspaces' | 'pruneWorkspaces' | 'addTicketNote' | 'removeTicketNotes' | 'setTicketHold' | 'ticketNotes' | 'setTierPin' | 'clearTierPins' | 'tierPins'> & {
   store: JobEvent[]; listeners: Set<(event: JobEvent) => void>; emit(event: JobEvent): void; activityValue: WorkflowActivity;
 } {
   const store = [...initial];
@@ -33,7 +33,11 @@ export function monitorPort(initial: JobEvent[] = []): Pick<WorkflowServicePort,
     addTicketNote: async () => { throw new Error('addTicketNote not faked'); },
     removeTicketNotes: async () => 0,
     setTicketHold: async () => undefined,
-    ticketNotes: async (issueKey?: string) => issueKey === undefined ? [] : [{ issue_key: issueKey, notes: [], held: false, status: 'not_seen' as const, attempts: 0, dry_runs: 0, latest_job_id: null, latest_state: null, last_activity_at: null, attempts_with_current_notes: 0 }],
+    ticketNotes: async (issueKey?: string) => issueKey === undefined ? [] : [{ issue_key: issueKey, notes: [], held: false, status: 'not_seen' as const, attempts: 0, dry_runs: 0, latest_job_id: null, latest_state: null, last_activity_at: null, attempts_with_current_notes: 0, tier_pins: [] }],
+    // Tier pin defaults: none stored. Tests override what they exercise.
+    setTierPin: async () => { throw new Error('setTierPin not faked'); },
+    clearTierPins: async () => 0,
+    tierPins: async () => [],
     pruneWorkspaces: async () => ({ dry_run: false, removed: [], failed: [], freed_bytes: null, remaining: 0 }),
   };
   return port;

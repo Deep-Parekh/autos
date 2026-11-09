@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ERROR_CODES } from './errors.js';
+import { effortSchema } from './config.js';
 import { branchNameSchema, gitShaSchema, issueKeySchema, jobIdSchema, jobStateSchema, providerSchema, roleSchema, timestampSchema } from './domain.js';
 
 export const jobRecordSchema = z.strictObject({
@@ -45,6 +46,7 @@ export const JOB_EVENT_TYPES = [
   'repair_round_started', 'commit_created', 'push_finished', 'job_finished',
   'poll_started', 'poll_finished', 'poll_failed', 'recovered', 'revision_requested', 'provider_fallback',
   'issue_closed', 'workspaces_pruned', 'job_paused', 'job_resumed', 'provider_gate_opened', 'provider_gate_closed',
+  'tier_selected', 'tier_escalated',
 ] as const;
 export const jobEventTypeSchema = z.enum(JOB_EVENT_TYPES);
 export const WORKFLOW_STAGES = ['intake', 'routing', 'baseline', 'implementation', 'checks', 'qa', 'review', 'repair', 'finalize', 'push'] as const;
@@ -75,6 +77,12 @@ export const jobEventSchema = z.strictObject({
   message: z.string().max(300).optional(),
   /** job_paused: when the attempt is due to resume; provider_gate_opened: when the gate lifts at the latest. */
   resume_at: timestampSchema.optional(),
+  /** Model tier (`tier` or `tier:effort` step label) of a ladder role call, tier_selected or tier_escalated event. */
+  tier: z.string().max(60).regex(/^[a-z0-9][a-z0-9_:-]*$/).optional(),
+  /** Model passed to the CLI for this call, when one was configured. */
+  model: z.string().max(200).regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/).optional(),
+  /** Reasoning effort passed to the CLI for this call (absent = CLI default). */
+  effort: effortSchema.optional(),
 });
 export type JobEvent = z.infer<typeof jobEventSchema>;
 export type JobEventType = z.infer<typeof jobEventTypeSchema>;
@@ -191,6 +199,9 @@ export const providerAttemptSchema = z.strictObject({
   continued_from_handoff: z.boolean().optional(),
   /** SWE only: whether the attempt left a progress checklist for a successor. */
   handoff_captured: z.boolean().optional(),
+  /** Ladder roles: tier name and reasoning effort of this attempt (null effort = CLI default); absent for plain chains. */
+  tier: z.string().max(40).nullable().optional(),
+  effort: effortSchema.nullable().optional(),
 });
 export type ProviderAttempt = z.infer<typeof providerAttemptSchema>;
 
@@ -350,5 +361,41 @@ export const ticketNotesSummarySchema = z.strictObject({
   last_activity_at: timestampSchema.nullable(),
   /** Attempts (any mode) that received every current ticket note; 0 means the current notes have not been used yet. */
   attempts_with_current_notes: z.number().int().min(0),
+  /** Operator model-tier pins for this issue (applied at pickup of every later attempt until cleared). */
+  tier_pins: z.array(z.lazy(() => tierPinSchema)).max(3).default([]),
 });
 export type TicketNotesSummary = z.infer<typeof ticketNotesSummarySchema>;
+
+/**
+ * Model-tier pins: an operator's choice of a role's starting tier (optionally with an effort override for its claude/codex
+ * entries) for an issue key, stored before or after Autos has seen the issue and applied when an attempt is picked up. A
+ * pin wins over triage and over the previous attempt's tier, but never goes below the role's floor (`min`). A tier of the
+ * role's ladder starts at its position (an override replaces it in place); another tier is a fixed step without
+ * escalation, refused for a role with a floor (not comparable).
+ */
+export const tierPinRequestSchema = z.strictObject({
+  role: roleSchema.default('swe'),
+  tier: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,39}$/),
+  effort: effortSchema.optional(),
+});
+export type TierPinRequest = z.input<typeof tierPinRequestSchema>;
+export const tierPinSchema = z.strictObject({
+  issue_key: issueKeySchema,
+  role: roleSchema,
+  tier: z.string().regex(/^[a-z0-9][a-z0-9_-]{0,39}$/),
+  /** Null: the lowest ladder step of this tier, else the CLI default effort. */
+  effort: effortSchema.nullable(),
+  author: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$/),
+  created_at: timestampSchema,
+});
+export type TierPin = z.infer<typeof tierPinSchema>;
+export const tierPinResultSchema = z.strictObject({
+  pin: tierPinSchema,
+  /** The step the pin resolves to under the current configuration (`tier:effort`, or `tier` for the CLI default). */
+  step: z.string().max(60),
+  /** Whether the tier is in the role's ladder (an effort override replaces it in place); false: a fixed step without escalation. */
+  in_ladder: z.boolean(),
+});
+export type TierPinResult = z.infer<typeof tierPinResultSchema>;
+/** Where a ladder role's first step came from. */
+export const TIER_START_SOURCES = ['attempt_pin', 'ticket_pin', 'previous', 'triage', 'lowest'] as const;

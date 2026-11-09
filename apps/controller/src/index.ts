@@ -1,9 +1,9 @@
-import Fastify, { LogController, type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from 'fastify';
+import Fastify, { LogController, type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
-import type { ActiveJob, AutosConfig, ArtifactManifest, RepositoryConfig, ArtifactStorePort, JobEvent, JobRecord, ProjectMapping, Provider, RunnerHealth, TicketNotesSummary, WorkflowActivity } from '@autos/contracts';
-import { artifactManifestSchema, AutosError, closeIssueRequestSchema, ERROR_CODES, ISSUE_RESOLUTIONS, issueKeySchema, JOB_EVENT_TYPES, JOB_STATES, MAX_TICKET_NOTES, PROVIDERS, TICKET_WORK_STATUSES, pruneWorkspacesRequestSchema, ROLES, operatorNoteRequestSchema, operatorNoteSchema, projectMappingSchema, WORKFLOW_STAGES, WORKSPACE_DIR_NAME_PATTERN, WORKSPACE_REMOVAL_REASONS, WORKSPACE_RETENTION_REASONS } from '@autos/contracts';
+import type { ActiveJob, AutosConfig, ArtifactManifest, Effort, OperatorNoteRequest, RepositoryConfig, ArtifactStorePort, JobEvent, JobRecord, ProjectMapping, Provider, RunnerHealth, TicketNotesSummary, WorkflowActivity } from '@autos/contracts';
+import { artifactManifestSchema, AutosError, closeIssueRequestSchema, EFFORT_LEVELS, ERROR_CODES, ISSUE_RESOLUTIONS, issueKeySchema, JOB_EVENT_TYPES, JOB_STATES, MAX_TICKET_NOTES, PROVIDERS, TICKET_WORK_STATUSES, pruneWorkspacesRequestSchema, ROLES, operatorNoteRequestSchema, operatorNoteSchema, projectMappingSchema, tierPinRequestSchema, WORKFLOW_STAGES, WORKSPACE_DIR_NAME_PATTERN, WORKSPACE_REMOVAL_REASONS, WORKSPACE_RETENTION_REASONS } from '@autos/contracts';
 import type { WorkflowServicePort } from '@autos/contracts';
 
 export interface ProviderDiagnostic {
@@ -200,6 +200,9 @@ const eventSchema = {
     repair_round: { type: 'integer', minimum: 0, maximum: 2 }, outcome: { type: 'string' }, code: { type: 'string', enum: [...ERROR_CODES] },
     elapsed_ms: { type: 'integer', minimum: 0 }, count: { type: 'integer', minimum: 0 }, message: { type: 'string', maxLength: 300 },
     resume_at: { type: 'string', format: 'date-time', description: 'job_paused: when the attempt is due to resume; provider_gate_opened: when the new-ticket gate lifts at the latest.' },
+    tier: { type: 'string', maxLength: 60, pattern: '^[a-z0-9][a-z0-9_:-]*$', description: 'Model tier step (`tier` or `tier:effort`) of a ladder role call, tier_selected or tier_escalated event.' },
+    model: { type: 'string', maxLength: 200, pattern: '^[A-Za-z0-9][A-Za-z0-9_.:/-]*$', description: 'Model passed to the provider CLI for this call, when one was configured.' },
+    effort: { type: 'string', enum: [...EFFORT_LEVELS], description: 'Reasoning effort passed to the provider CLI for this call (absent: the CLI default).' },
   }, required: ['event_id', 'at', 'type', 'job_id', 'issue_key'],
 } as const;
 const issueKeyParams = { type: 'object', properties: { issueKey: { type: 'string', pattern: '^[A-Z][A-Z0-9]*-[1-9][0-9]*$' } }, required: ['issueKey'] } as const;
@@ -283,9 +286,49 @@ const ticketNoteCreatedSchemaJson = {
   required: [...ticketNoteSchemaJson.required, 'jira'],
   examples: [{ ...ticketNoteSchemaJson.examples[0], jira: 'unchecked' }],
 } as const;
+const tierNamePattern = '^[a-z0-9][a-z0-9_-]{0,39}$';
+const tierPinSchemaJson = {
+  type: 'object', additionalProperties: false,
+  description: 'An operator model-tier pin: the starting tier of one role for every later attempt of the issue, until cleared.',
+  properties: {
+    issue_key: { type: 'string', pattern: '^[A-Z][A-Z0-9]*-[1-9][0-9]*$' }, role: { type: 'string', enum: [...roleEnum] },
+    tier: { type: 'string', pattern: tierNamePattern, description: 'A tier name from model_tiers.' },
+    effort: { type: ['string', 'null'], enum: [...EFFORT_LEVELS, null], description: 'Effort override for every entry of the tier whose provider accepts one; null: each entry keeps its configured effort.' },
+    author: { type: 'string', pattern: actorPattern.source }, created_at: { type: 'string', format: 'date-time' },
+  }, required: ['issue_key', 'role', 'tier', 'effort', 'author', 'created_at'],
+  examples: [{ issue_key: 'SAMPLE-123', role: 'swe', tier: 'med', effort: 'xhigh', author: 'operator', created_at: '2026-11-07T12:00:00.000Z' }],
+} as const;
+const tierPinRequestSchemaJson = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    role: { type: 'string', enum: [...roleEnum], default: 'swe', description: 'Role whose starting step is pinned; defaults to swe.' },
+    tier: { type: 'string', pattern: tierNamePattern, description: 'A tier name from model_tiers.' },
+    effort: { type: 'string', enum: [...EFFORT_LEVELS], description: 'Optional effort override applied to every entry of the tier whose provider accepts efforts (Cursor entries run without one); must be valid for each Claude/Codex entry. Omitted: each entry keeps its configured effort.' },
+  }, required: ['tier'], examples: [{ role: 'swe', tier: 'med', effort: 'xhigh' }],
+} as const;
+const tierPinResultSchemaJson = {
+  type: 'object', additionalProperties: false,
+  properties: {
+    pin: tierPinSchemaJson,
+    step: { type: 'string', maxLength: 60, description: 'The starting step: `tier`, or `tier:effort` with an effort override.' },
+    in_ladder: { type: 'boolean', description: 'True when the tier is in the role\'s ladder (the role starts at its position and escalation continues to the next tier); false for a fixed step with no escalation (a tier outside the ladder, or a role without a ladder).' },
+  }, required: ['pin', 'step', 'in_ladder'],
+  examples: [{ pin: tierPinSchemaJson.examples[0], step: 'med:xhigh', in_ladder: true }],
+} as const;
+const tierPinsListSchemaJson = { type: 'object', additionalProperties: false, properties: { pins: { type: 'array', maxItems: 3, items: tierPinSchemaJson } }, required: ['pins'], examples: [{ pins: [] }] } as const;
+/** Revision request: the note fields plus an optional SWE tier pin for this revision only. */
+const revisionRequestSchemaJson = {
+  ...noteRequestSchema,
+  properties: {
+    ...noteRequestSchema.properties,
+    tier: { type: 'string', pattern: tierNamePattern, description: 'Optional SWE starting tier (a `model_tiers` name) for this revision only (wins over the ticket pin and the previous attempt\'s finishing step; never below the role\'s floor).' },
+    effort: { type: 'string', enum: [...EFFORT_LEVELS], description: 'Optional effort override for the entries of `tier`; only valid together with `tier` (400 otherwise).' },
+  },
+  examples: [{ instructions: 'Also handle the empty-list case.', roles: ['swe'], tier: 'med', effort: 'xhigh' }],
+} as const;
 const ticketNotesSummarySchemaJson = {
   type: 'object', additionalProperties: false,
-  description: 'An issue with ticket notes or a hold, and whether Autos has worked on it.',
+  description: 'An issue with ticket notes, a hold or tier pins, and whether Autos has worked on it.',
   properties: {
     issue_key: { type: 'string', pattern: '^[A-Z][A-Z0-9]*-[1-9][0-9]*$' },
     notes: { type: 'array', maxItems: MAX_TICKET_NOTES, items: ticketNoteSchemaJson },
@@ -295,8 +338,9 @@ const ticketNotesSummarySchemaJson = {
     latest_job_id: { type: ['string', 'null'], format: 'uuid' }, latest_state: { type: ['string', 'null'], enum: [...jobStateEnum, null] },
     last_activity_at: nullableString,
     attempts_with_current_notes: { type: 'integer', minimum: 0, description: 'Attempts (any mode) that received every current ticket note.' },
-  }, required: ['issue_key', 'notes', 'held', 'status', 'attempts', 'dry_runs', 'latest_job_id', 'latest_state', 'last_activity_at', 'attempts_with_current_notes'],
-  examples: [{ issue_key: 'SAMPLE-123', notes: [], held: true, status: 'held', attempts: 0, dry_runs: 0, latest_job_id: null, latest_state: null, last_activity_at: null, attempts_with_current_notes: 0 }],
+    tier_pins: { type: 'array', maxItems: 3, items: tierPinSchemaJson, description: 'Operator model-tier pins (at most one per role), applied when each later attempt is picked up until cleared.' },
+  }, required: ['issue_key', 'notes', 'held', 'status', 'attempts', 'dry_runs', 'latest_job_id', 'latest_state', 'last_activity_at', 'attempts_with_current_notes', 'tier_pins'],
+  examples: [{ issue_key: 'SAMPLE-123', notes: [], held: true, status: 'held', attempts: 0, dry_runs: 0, latest_job_id: null, latest_state: null, last_activity_at: null, attempts_with_current_notes: 0, tier_pins: [] }],
 } as const;
 const ticketNotesListSchemaJson = { type: 'object', additionalProperties: false, properties: { tickets: { type: 'array', items: ticketNotesSummarySchemaJson } }, required: ['tickets'], examples: [{ tickets: [] }] } as const;
 const issueDetailSchema = {
@@ -442,7 +486,7 @@ export interface StatusResponse {
 }
 
 function emptyTicketSummary(issueKey: string): TicketNotesSummary {
-  return { issue_key: issueKey, notes: [], held: false, status: 'not_seen', attempts: 0, dry_runs: 0, latest_job_id: null, latest_state: null, last_activity_at: null, attempts_with_current_notes: 0 };
+  return { issue_key: issueKey, notes: [], held: false, status: 'not_seen', attempts: 0, dry_runs: 0, latest_job_id: null, latest_state: null, last_activity_at: null, attempts_with_current_notes: 0, tier_pins: [] };
 }
 
 function elapsedSeconds(from: string | null | undefined, now: number): number | undefined {
@@ -623,26 +667,56 @@ export async function createController(options: ControllerOptions): Promise<Fast
       return found === null ? 'unchecked' : found ? 'found' : 'not_found';
     } catch { return 'unchecked'; } finally { if (timer) clearTimeout(timer); }
   };
-  app.post('/v1/jobs/:jobId/revisions', { schema: { tags: ['operator'], summary: 'Request changes on a READY_FOR_HUMAN job', description: 'Queues a revision that continues from the reviewed commit on the same feature branch, with operator notes delivered to the selected roles (default SWE). Only the latest READY_FOR_HUMAN attempt of an issue with no active attempt can be revised (409 otherwise). The optional `X-Autos-Operator` header labels the note author; it is a label, not authentication. Notes are stored as evidence and never appear in responses, events, or logs.', operationId: 'createJobRevision', security: [{ bearerAuth: [] }], params: { type: 'object', properties: { jobId: { type: 'string', format: 'uuid' } }, required: ['jobId'] }, headers: { type: 'object', properties: { 'x-autos-operator': { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$', description: 'Optional author label (not authentication). Defaults to operator.' } } }, body: noteRequestSchema, response: { 202: jobSchema, 400: errorSchema, 404: errorSchema, 409: errorSchema } } }, async (request, reply) => {
+  const revisionTierDescription = 'Optional `tier` (with an optional `effort` override for its entries) sets the SWE starting tier for this revision only: it wins over the ticket pin and over the step that finished the previous attempt, but never goes below the role\'s ladder floor (`min`); 400 with the reason for an unknown tier, an effort a Claude/Codex entry of the tier does not accept, or a tier below the floor.';
+  /** Splits a revision body into the note (Zod-validated as before) and an optional SWE tier pin (Zod-validated). */
+  const parseRevision = (body: unknown): { note: OperatorNoteRequest; pin?: { tier: string; effort?: Effort } } | null => {
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) return null;
+    const { tier, effort, ...rest } = body as Record<string, unknown>;
+    const note = operatorNoteRequestSchema.safeParse(rest);
+    if (!note.success) return null;
+    if (tier === undefined) return effort === undefined ? { note: note.data } : null;
+    const pin = tierPinRequestSchema.omit({ role: true }).safeParse({ tier, ...(effort !== undefined ? { effort } : {}) });
+    if (!pin.success) return null;
+    return { note: note.data, pin: { tier: pin.data.tier, ...(pin.data.effort !== undefined ? { effort: pin.data.effort } : {}) } };
+  };
+  const pinAudit = (pin: { tier: string; effort?: Effort } | undefined): Record<string, string> => pin ? { tier: pin.tier, ...(pin.effort ? { effort: pin.effort } : {}) } : {};
+  /**
+   * Runs a workflow call whose INVALID_INPUT carries an operator-facing reason (unknown tier, effort not valid for the
+   * provider, below the floor). The reason is workflow-authored text about configuration names, scrubbed again here.
+   * Returns undefined after replying 400; every other error goes to the shared error handler.
+   */
+  const withInputReason = async <T>(request: FastifyRequest, reply: FastifyReply, run: () => Promise<T>, explain = true): Promise<T | undefined> => {
+    try { return await run(); } catch (error) {
+      if (!explain || !(error instanceof AutosError) || error.code !== 'INVALID_INPUT') throw error;
+      request.log.warn({ event: 'request_error', request_id: request.id, route: request.routeOptions?.url ?? 'unmatched', status: 400, code: 'INVALID_INPUT' });
+      reply.code(400).send({ code: 'INVALID_INPUT', message: scrubText(error.message, 300) || 'Request is invalid', request_id: request.id });
+      return undefined;
+    }
+  };
+  app.post('/v1/jobs/:jobId/revisions', { schema: { tags: ['operator'], summary: 'Request changes on a READY_FOR_HUMAN job', description: 'Queues a revision that continues from the reviewed commit on the same feature branch, with operator notes delivered to the selected roles (default SWE). Only the latest READY_FOR_HUMAN attempt of an issue with no active attempt can be revised (409 otherwise). The optional `X-Autos-Operator` header labels the note author; it is a label, not authentication. Notes are stored as evidence and never appear in responses, events, or logs. ' + revisionTierDescription, operationId: 'createJobRevision', security: [{ bearerAuth: [] }], params: { type: 'object', properties: { jobId: { type: 'string', format: 'uuid' } }, required: ['jobId'] }, headers: { type: 'object', properties: { 'x-autos-operator': { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$', description: 'Optional author label (not authentication). Defaults to operator.' } } }, body: revisionRequestSchemaJson, response: { 202: jobSchema, 400: errorSchema, 404: errorSchema, 409: errorSchema } } }, async (request, reply) => {
     const { jobId } = request.params as { jobId: string };
-    const note = operatorNoteRequestSchema.safeParse(request.body);
-    if (!note.success) return reply.code(400).send({ code: 'INVALID_INPUT', message: 'Invalid revision request', request_id: request.id });
+    const parsed = parseRevision(request.body);
+    if (!parsed) return reply.code(400).send({ code: 'INVALID_INPUT', message: 'Invalid revision request', request_id: request.id });
+    const { note, pin } = parsed;
     const author = operatorLabel(request);
     if (author === null) return reply.code(400).send({ code: 'INVALID_INPUT', message: 'Invalid operator label', request_id: request.id });
     if (!await options.workflow.get(jobId)) return reply.code(404).send({ code: 'NOT_FOUND', message: 'Job not found', request_id: request.id });
-    const job = await options.workflow.revise(jobId, note.data, author);
-    audit(request, 'job_revise', { job_id: job.job_id, parent_job_id: jobId, issue_key: job.issue_key, roles: note.data.roles ?? ['swe'] });
+    const job = await withInputReason(request, reply, () => pin ? options.workflow.revise(jobId, note, author, pin) : options.workflow.revise(jobId, note, author), pin !== undefined);
+    if (!job) return reply;
+    audit(request, 'job_revise', { job_id: job.job_id, parent_job_id: jobId, issue_key: job.issue_key, roles: note.roles ?? ['swe'], ...pinAudit(pin) });
     if (job.state === 'QUEUED') launch(job.job_id);
     return reply.code(202).send(safeJob(job));
   });
-  app.post('/v1/issues/:issueKey/revisions', { schema: { tags: ['operator'], summary: 'Request changes on an issue\'s latest READY_FOR_HUMAN attempt', description: 'Queues a revision that continues from the latest READY_FOR_HUMAN attempt of the issue (same feature branch and pinned base), with operator notes delivered to the selected roles (default SWE). 404 when the issue has no READY_FOR_HUMAN attempt; 409 when the issue is closed, another attempt is active, or the READY_FOR_HUMAN attempt is not revisable. The optional `X-Autos-Operator` header labels the note author; it is a label, not authentication. Notes are stored as evidence and never appear in responses, events, or logs.', operationId: 'createIssueRevision', security: [{ bearerAuth: [] }], params: issueKeyParams, headers: actorHeaders, body: noteRequestSchema, response: { 202: jobSchema, 400: errorSchema, 404: errorSchema, 409: errorSchema } } }, async (request, reply) => {
+  app.post('/v1/issues/:issueKey/revisions', { schema: { tags: ['operator'], summary: 'Request changes on an issue\'s latest READY_FOR_HUMAN attempt', description: 'Queues a revision that continues from the latest READY_FOR_HUMAN attempt of the issue (same feature branch and pinned base), with operator notes delivered to the selected roles (default SWE). 404 when the issue has no READY_FOR_HUMAN attempt; 409 when the issue is closed, another attempt is active, or the READY_FOR_HUMAN attempt is not revisable. The optional `X-Autos-Operator` header labels the note author; it is a label, not authentication. Notes are stored as evidence and never appear in responses, events, or logs. ' + revisionTierDescription, operationId: 'createIssueRevision', security: [{ bearerAuth: [] }], params: issueKeyParams, headers: actorHeaders, body: revisionRequestSchemaJson, response: { 202: jobSchema, 400: errorSchema, 404: errorSchema, 409: errorSchema } } }, async (request, reply) => {
     const { issueKey } = request.params as { issueKey: string };
-    const note = operatorNoteRequestSchema.safeParse(request.body);
-    if (!note.success) return reply.code(400).send({ code: 'INVALID_INPUT', message: 'Invalid revision request', request_id: request.id });
+    const parsed = parseRevision(request.body);
+    if (!parsed) return reply.code(400).send({ code: 'INVALID_INPUT', message: 'Invalid revision request', request_id: request.id });
+    const { note, pin } = parsed;
     const author = operatorLabel(request);
     if (author === null) return reply.code(400).send({ code: 'INVALID_INPUT', message: 'Invalid operator label', request_id: request.id });
-    const job = await options.workflow.reviseIssue(issueKey, note.data, author);
-    audit(request, 'issue_revise', { job_id: job.job_id, issue_key: job.issue_key, ...(job.parent_job_id ? { parent_job_id: job.parent_job_id } : {}), roles: note.data.roles ?? ['swe'] });
+    const job = await withInputReason(request, reply, () => pin ? options.workflow.reviseIssue(issueKey, note, author, pin) : options.workflow.reviseIssue(issueKey, note, author), pin !== undefined);
+    if (!job) return reply;
+    audit(request, 'issue_revise', { job_id: job.job_id, issue_key: job.issue_key, ...(job.parent_job_id ? { parent_job_id: job.parent_job_id } : {}), roles: note.roles ?? ['swe'], ...pinAudit(pin) });
     if (job.state === 'QUEUED') launch(job.job_id);
     return reply.code(202).send(safeJob(job));
   });
@@ -656,7 +730,7 @@ export async function createController(options: ControllerOptions): Promise<Fast
     audit(request, 'issue_close', { issue_key: issueKey, resolution: body.data.resolution, dry_run: result.dry_run, removed: result.removed.length, failed: result.failed.length });
     return result;
   });
-  app.get('/v1/issues/:issueKey', { schema: { tags: ['operator'], summary: 'Get an issue\'s closure, attempts and ticket notes', description: 'Returns the closure record (null while the issue is open), the issue\'s most recent attempts, newest first, and its ticket notes with the hold and progress summary. 404 when Autos knows nothing about the issue (no attempts, closure, ticket notes or hold).', operationId: 'getIssue', security: [{ bearerAuth: [] }], params: issueKeyParams, response: { 200: issueDetailSchema, 404: errorSchema } } }, async (request, reply) => {
+  app.get('/v1/issues/:issueKey', { schema: { tags: ['operator'], summary: 'Get an issue\'s closure, attempts and ticket notes', description: 'Returns the closure record (null while the issue is open), the issue\'s most recent attempts, newest first, and its ticket notes with the hold and progress summary. 404 when Autos knows nothing about the issue (no attempts, closure, ticket notes, hold or tier pins).', operationId: 'getIssue', security: [{ bearerAuth: [] }], params: issueKeyParams, response: { 200: issueDetailSchema, 404: errorSchema } } }, async (request, reply) => {
     const { issueKey } = request.params as { issueKey: string };
     const closure = await options.workflow.closure(issueKey);
     const found: JobRecord[] = [];
@@ -666,7 +740,7 @@ export async function createController(options: ControllerOptions): Promise<Fast
       if (page.length < 100) break;
     }
     const ticket = (await options.workflow.ticketNotes(issueKey))[0] ?? emptyTicketSummary(issueKey);
-    if (!closure && found.length === 0 && ticket.notes.length === 0 && !ticket.held) return reply.code(404).send({ code: 'NOT_FOUND', message: 'Issue not found', request_id: request.id });
+    if (!closure && found.length === 0 && ticket.notes.length === 0 && !ticket.held && (ticket.tier_pins ?? []).length === 0) return reply.code(404).send({ code: 'NOT_FOUND', message: 'Issue not found', request_id: request.id });
     found.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
     return { issue_key: issueKey, closure, jobs: found.slice(0, ISSUE_JOBS_LIMIT).map(safeJob), ticket_notes: ticket };
   });
@@ -705,8 +779,31 @@ export async function createController(options: ControllerOptions): Promise<Fast
   };
   app.put('/v1/issues/:issueKey/hold', { schema: holdSchema('Hold an issue', 'holdIssue', 'Stops automatic discovery from queueing the issue until released (explicit runs still work). Works before Autos has seen the issue.') }, async (request, reply) => setHold(request, reply, true));
   app.delete('/v1/issues/:issueKey/hold', { schema: holdSchema('Release a held issue', 'releaseIssue', 'Lets automatic discovery queue the issue again.') }, async (request, reply) => setHold(request, reply, false));
-  app.get('/v1/notes', { schema: { tags: ['operator'], summary: 'List issues with ticket notes or a hold', description: 'Every issue that has ticket notes or is held, with whether Autos has worked on it (status, attempts, latest state, whether the latest attempts used the current notes).', operationId: 'listTicketNotes', security: [{ bearerAuth: [] }], response: { 200: ticketNotesListSchemaJson } } }, async () => ({ tickets: await options.workflow.ticketNotes() }));
-  app.get('/v1/issues/:issueKey/notes', { schema: { tags: ['operator'], summary: 'Get one issue\'s ticket notes and progress', description: 'Always returns a summary, even for an issue with no notes, no hold and no attempts (status not_seen).', operationId: 'getTicketNotes', security: [{ bearerAuth: [] }], params: issueKeyParams, response: { 200: ticketNotesSummarySchemaJson } } }, async (request) => {
+  const tierDescription = 'A tier pin chooses a role\'s starting tier (a `model_tiers` name, optionally with an effort override) for an issue key. It can be stored before or after Autos has seen the issue, survives restarts and applies whenever a later attempt is picked up, until cleared. Precedence: a revision\'s own `tier` > this pin > the step that finished the previous attempt (revisions and retries) > triage > the first ladder tier; never below the role\'s floor (`min`). `effort` overrides the effort of every entry of the tier whose provider accepts one (Cursor entries run without one) and must be valid for each Claude/Codex entry. A tier in the role\'s ladder starts at its position (with an effort override it replaces that ladder step in place) and escalation continues to the next tier. A tier not in the ladder is a fixed step with no escalation, refused for a role with a floor; roles without a ladder can be pinned to any tier (fixed step).';
+  app.get('/v1/issues/:issueKey/tier', { schema: { tags: ['operator'], summary: 'List an issue\'s model-tier pins', description: `${tierDescription} Returns an empty list when the issue has no pins.`, operationId: 'getTierPins', security: [{ bearerAuth: [] }], params: issueKeyParams, response: { 200: tierPinsListSchemaJson } } }, async (request) => {
+    const { issueKey } = request.params as { issueKey: string };
+    return { pins: await options.workflow.tierPins(issueKey) };
+  });
+  app.put('/v1/issues/:issueKey/tier', { schema: { tags: ['operator'], summary: 'Pin a role\'s starting model tier for an issue', description: `${tierDescription} Replaces the role's previous pin. 400 with the reason for an unknown tier, an effort a Claude/Codex entry of the tier does not accept, a tier below the role's floor or outside the ladder of a role with a floor, or a project outside jira.allowed_projects; 409 when the issue is closed. The optional \`X-Autos-Operator\` header labels the author; it is a label, not authentication.`, operationId: 'setTierPin', security: [{ bearerAuth: [] }], params: issueKeyParams, headers: actorHeaders, body: tierPinRequestSchemaJson, response: { 200: tierPinResultSchemaJson, 400: errorSchema, 409: errorSchema } } }, async (request, reply) => {
+    const { issueKey } = request.params as { issueKey: string };
+    const pin = tierPinRequestSchema.safeParse(request.body);
+    if (!pin.success) return reply.code(400).send({ code: 'INVALID_INPUT', message: 'Invalid tier pin', request_id: request.id });
+    const author = operatorLabel(request);
+    if (author === null) return reply.code(400).send({ code: 'INVALID_INPUT', message: 'Invalid operator label', request_id: request.id });
+    const result = await withInputReason(request, reply, () => options.workflow.setTierPin(issueKey, pin.data, author));
+    if (!result) return reply;
+    audit(request, 'tier_pin_set', { issue_key: issueKey, role: result.pin.role, tier: result.pin.tier, effort: result.pin.effort, step: result.step, in_ladder: result.in_ladder });
+    return result;
+  });
+  app.delete('/v1/issues/:issueKey/tier', { schema: { tags: ['operator'], summary: 'Clear an issue\'s model-tier pins', description: 'Removes the pin of one role (`role`) or of every role; later attempts start from the usual step again (attempts already picked up keep their step).', operationId: 'clearTierPins', security: [{ bearerAuth: [] }], params: issueKeyParams, headers: actorHeaders, querystring: { type: 'object', additionalProperties: false, properties: { role: { type: 'string', enum: [...roleEnum] } } }, response: { 200: { type: 'object', additionalProperties: false, properties: { removed: { type: 'integer', minimum: 0 } }, required: ['removed'], examples: [{ removed: 1 }] }, 400: errorSchema } } }, async (request) => {
+    const { issueKey } = request.params as { issueKey: string };
+    const { role } = request.query as { role?: (typeof ROLES)[number] };
+    const removed = role === undefined ? await options.workflow.clearTierPins(issueKey) : await options.workflow.clearTierPins(issueKey, role);
+    audit(request, 'tier_pin_clear', { issue_key: issueKey, ...(role ? { role } : {}), removed });
+    return { removed };
+  });
+  app.get('/v1/notes', { schema: { tags: ['operator'], summary: 'List issues with ticket notes, a hold or tier pins', description: 'Every issue that has ticket notes, is held or has tier pins, with whether Autos has worked on it (status, attempts, latest state, whether the latest attempts used the current notes).', operationId: 'listTicketNotes', security: [{ bearerAuth: [] }], response: { 200: ticketNotesListSchemaJson } } }, async () => ({ tickets: await options.workflow.ticketNotes() }));
+  app.get('/v1/issues/:issueKey/notes', { schema: { tags: ['operator'], summary: 'Get one issue\'s ticket notes and progress', description: 'Always returns a summary, even for an issue with no notes, no hold, no tier pins and no attempts (status not_seen).', operationId: 'getTicketNotes', security: [{ bearerAuth: [] }], params: issueKeyParams, response: { 200: ticketNotesSummarySchemaJson } } }, async (request) => {
     const { issueKey } = request.params as { issueKey: string };
     return (await options.workflow.ticketNotes(issueKey))[0] ?? emptyTicketSummary(issueKey);
   });

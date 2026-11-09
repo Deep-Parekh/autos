@@ -3,7 +3,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { resolveToolchain, missingToolchains, installedToolchainsSchema, type ToolchainSelection, closeIssueRequestSchema, providerCallSchema, datasetRecordSchema, datasetExportOptionsSchema, type ProviderCall, type DatasetRecord, type DatasetExportOptions, type AutosConfig, closeIssueResultSchema, issueClosureSchema, pruneWorkspacesRequestSchema, pruneWorkspacesResultSchema, workspaceEntrySchema, WORKSPACE_DIR_NAME_PATTERN, type IssueClosure, type IssueResolution, type CloseIssueRequest, type CloseIssueResult, type PruneWorkspacesRequest, type PruneWorkspacesResult, type WorkspaceEntry, artifactManifestSchema, AutosError, FALLBACK_ERROR_CODES, HANDOFF_ERROR_CODES, INSTRUCTION_FILE_BASENAMES, INSTRUCTION_FILE_PATTERNS, HANDOFF_DIR, type RepositoryConfig, type RepositoryInstructionFile, providerAttemptSchema, type ProviderAttempt, operatorNoteRequestSchema, operatorNoteSchema, ticketNoteSchema, ticketNotesSummarySchema, MAX_TICKET_NOTES, type TicketNote, type TicketNotesSummary, type OperatorNote, type OperatorNoteRequest, jobEventSchema, workflowActivitySchema, canTransition, checksSchema, evaluateFinalization, issueKeySchema, jobIdSchema, jobRecordSchema, jobStateSchema, relativePathSchema, roleSchema, timestampSchema, type ArtifactManifest, type JobRecord, type JobState, type WorkflowDependencies, type WorkflowServicePort, type GitWorkspace, type ProviderResult, type Checks, type QaResult, type ReviewResult, type JobEvent, type NewJobEvent, type WorkflowActivity, type WorkflowStage, providerSchema, PAUSE_ERROR_CODES, pauseCheckpointSchema, summarizeTranscriptActions, type PauseCheckpoint, type TranscriptAction, type AgentRole, type ErrorCode } from '@autos/contracts';
+import { resolveToolchain, missingToolchains, installedToolchainsSchema, type ToolchainSelection, closeIssueRequestSchema, providerCallSchema, datasetRecordSchema, datasetExportOptionsSchema, type ProviderCall, type DatasetRecord, type DatasetExportOptions, type AutosConfig, closeIssueResultSchema, issueClosureSchema, pruneWorkspacesRequestSchema, pruneWorkspacesResultSchema, workspaceEntrySchema, WORKSPACE_DIR_NAME_PATTERN, type IssueClosure, type IssueResolution, type CloseIssueRequest, type CloseIssueResult, type PruneWorkspacesRequest, type PruneWorkspacesResult, type WorkspaceEntry, artifactManifestSchema, AutosError, FALLBACK_ERROR_CODES, HANDOFF_ERROR_CODES, INSTRUCTION_FILE_BASENAMES, INSTRUCTION_FILE_PATTERNS, HANDOFF_DIR, type RepositoryConfig, type RepositoryInstructionFile, providerAttemptSchema, type ProviderAttempt, operatorNoteRequestSchema, operatorNoteSchema, ticketNoteSchema, ticketNotesSummarySchema, MAX_TICKET_NOTES, type TicketNote, type TicketNotesSummary, type OperatorNote, type OperatorNoteRequest, jobEventSchema, workflowActivitySchema, canTransition, checksSchema, evaluateFinalization, issueKeySchema, jobIdSchema, jobRecordSchema, jobStateSchema, relativePathSchema, roleSchema, timestampSchema, type ArtifactManifest, type JobRecord, type JobState, type WorkflowDependencies, type WorkflowServicePort, type GitWorkspace, type ProviderResult, type Checks, type QaResult, type ReviewResult, type JobEvent, type NewJobEvent, type WorkflowActivity, type WorkflowStage, providerSchema, PAUSE_ERROR_CODES, pauseCheckpointSchema, summarizeTranscriptActions, type PauseCheckpoint, type TranscriptAction, type AgentRole, type ErrorCode, tierPinSchema, tierPinRequestSchema, type TierPin, type TierPinRequest, type TierPinResult, parseTierStep, formatTierStep, type ResolvedChainEntry, type TierStepRef } from '@autos/contracts';
+import { tierStateSchema, selectStart, placePin, resolveStep, escalate as escalateTier, ladderOf, parseTriage, triagePrompt, ROLE_NAMES, type TierState, type RoleTierState, type TriageChoice } from './tiers.js';
 
 /** JobRecord plus the revision fields (the exported interface may lag the Zod schema). */
 type Job = JobRecord & { parent_job_id?: string; revision?: number };
@@ -126,6 +127,50 @@ export class SqliteJobStore {
     // Provider limit gate: providers known to be limited (from a fully limited role chain) and until when.
     this.db.exec(`CREATE TABLE IF NOT EXISTS provider_limits (provider TEXT PRIMARY KEY, limited_until TEXT NOT NULL, recorded_at TEXT NOT NULL, job_id TEXT);
       INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(9, '${nowIso()}')`);
+    // Model tiers: operator pins by issue key (applied at pickup), per-attempt start seeds (revision pin, previous step) and the attempt's tier state.
+    this.db.exec(`CREATE TABLE IF NOT EXISTS tier_pins (issue_key TEXT NOT NULL, role TEXT NOT NULL, tier TEXT NOT NULL, effort TEXT, author TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(issue_key, role));
+      CREATE TABLE IF NOT EXISTS job_tier_seeds (job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE, role TEXT NOT NULL, step TEXT NOT NULL, source TEXT NOT NULL, PRIMARY KEY(job_id, role, source));
+      CREATE TABLE IF NOT EXISTS job_tier_state (job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE, state TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+    addColumn('tier', 'TEXT', 'job_events'); addColumn('model', 'TEXT', 'job_events'); addColumn('effort', 'TEXT', 'job_events');
+    this.db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(10, '${nowIso()}')`);
+  }
+  // ---- Model-tier pins and per-attempt tier state ----
+  setTierPin(pin: TierPin): TierPin {
+    const valid = tierPinSchema.parse(pin);
+    return this.tx(() => {
+      this.assertOpen(valid.issue_key);
+      this.db.prepare('INSERT INTO tier_pins(issue_key,role,tier,effort,author,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(issue_key,role) DO UPDATE SET tier=excluded.tier,effort=excluded.effort,author=excluded.author,created_at=excluded.created_at')
+        .run(valid.issue_key, valid.role, valid.tier, valid.effort, valid.author, valid.created_at);
+      return valid;
+    });
+  }
+  clearTierPins(issueKey: string, role?: AgentRole): number {
+    return Number((role ? this.db.prepare('DELETE FROM tier_pins WHERE issue_key=? AND role=?').run(issueKey, role) : this.db.prepare('DELETE FROM tier_pins WHERE issue_key=?').run(issueKey)).changes);
+  }
+  tierPins(issueKey: string): TierPin[] {
+    return (this.db.prepare("SELECT * FROM tier_pins WHERE issue_key=? ORDER BY CASE role WHEN 'swe' THEN 0 WHEN 'qa' THEN 1 ELSE 2 END").all(issueKey) as Array<Record<string, string | null>>)
+      .map((r) => tierPinSchema.parse({ issue_key: r.issue_key, role: r.role, tier: r.tier, effort: r.effort ?? null, author: r.author, created_at: r.created_at }));
+  }
+  /** Start seeds of one attempt: 'attempt_pin' (revise --tier) and 'previous' (the step that finished the attempt it continues). */
+  tierSeeds(jobId: string): Array<{ role: AgentRole; step: string; source: 'attempt_pin' | 'previous' }> {
+    return (this.db.prepare('SELECT role,step,source FROM job_tier_seeds WHERE job_id=?').all(jobId) as Array<{ role: string; step: string; source: string }>)
+      .filter((r) => roleSchema.safeParse(r.role).success && (r.source === 'attempt_pin' || r.source === 'previous'))
+      .map((r) => ({ role: r.role as AgentRole, step: r.step, source: r.source as 'attempt_pin' | 'previous' }));
+  }
+  private insertSeeds(jobId: string, previousJobId: string | null, attemptPin?: string): void {
+    if (previousJobId) {
+      const prior = this.tierState(previousJobId);
+      for (const [role, st] of Object.entries(prior?.roles ?? {})) if (st) this.db.prepare('INSERT OR REPLACE INTO job_tier_seeds(job_id,role,step,source) VALUES(?,?,?,?)').run(jobId, role, st.steps[st.current_index]!, 'previous');
+    }
+    if (attemptPin) this.db.prepare('INSERT OR REPLACE INTO job_tier_seeds(job_id,role,step,source) VALUES(?,?,?,?)').run(jobId, 'swe', attemptPin, 'attempt_pin');
+  }
+  saveTierState(jobId: string, state: TierState): void {
+    jobIdSchema.parse(jobId); const valid = tierStateSchema.parse(state);
+    this.db.prepare('INSERT INTO job_tier_state(job_id,state,updated_at) VALUES(?,?,?) ON CONFLICT(job_id) DO UPDATE SET state=excluded.state,updated_at=excluded.updated_at').run(jobId, JSON.stringify(valid), nowIso());
+  }
+  tierState(jobId: string): TierState | null {
+    const row = this.db.prepare('SELECT state FROM job_tier_state WHERE job_id=?').get(jobId) as { state?: string } | undefined; if (!row?.state) return null;
+    try { const parsed = tierStateSchema.safeParse(JSON.parse(row.state)); return parsed.success ? parsed.data : null; } catch { return null; }
   }
   private tx<T>(fn: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const value = fn(); this.db.exec('COMMIT'); return value; } catch (e) { this.db.exec('ROLLBACK'); throw e; } }
   async create(job: Job): Promise<void> {
@@ -151,7 +196,7 @@ export class SqliteJobStore {
    * Queues a revision of the latest READY_FOR_HUMAN attempt for its issue. All rules are checked in one transaction so two
    * concurrent requests cannot both succeed. Returns the stored record (revision = parent.revision + 1).
    */
-  async createRevision(parentId: string, jobId: string, at: string, notes: OperatorNote[]): Promise<Job> {
+  async createRevision(parentId: string, jobId: string, at: string, notes: OperatorNote[], attemptPin?: string): Promise<Job> {
     jobIdSchema.parse(parentId); jobIdSchema.parse(jobId);
     return this.tx(() => {
       const row = this.db.prepare('SELECT jobs.*, (SELECT resolution FROM issue_closures WHERE issue_closures.issue_key=jobs.issue_key) AS closed_as FROM jobs WHERE job_id=?').get(parentId) as Record<string, unknown> | undefined;
@@ -167,7 +212,7 @@ export class SqliteJobStore {
       if (revision > 20) throw new AutosError('CONFLICT', 'Revision limit reached for this issue');
       const job = jobRecordSchema.parse({ job_id: jobId, issue_key: parent.issue_key, repository_id: parent.repository_id, base_sha: parent.base_sha, state: 'QUEUED', dry_run: false, repair_round: 0,
         created_at: at, updated_at: at, feature_branch: parent.feature_branch, base_branch: parent.base_branch, parent_job_id: parent.job_id, revision }) as Job;
-      this.insert(job); this.insertNotes(job.job_id, notes); this.attachTicketNotes(job.job_id, job.issue_key);
+      this.insert(job); this.insertNotes(job.job_id, notes); this.attachTicketNotes(job.job_id, job.issue_key); this.insertSeeds(job.job_id, parent.job_id, attemptPin);
       return job;
     });
   }
@@ -269,7 +314,7 @@ export class SqliteJobStore {
   heldKeys(): Set<string> { return new Set((this.db.prepare('SELECT issue_key FROM ticket_holds').all() as Array<{ issue_key: string }>).map((r) => r.issue_key)); }
   /** One summary per issue with ticket notes or a hold, or exactly the requested issue. */
   ticketSummaries(issueKey?: string): TicketNotesSummary[] {
-    const keys = issueKey !== undefined ? [issueKey] : (this.db.prepare('SELECT issue_key FROM ticket_notes UNION SELECT issue_key FROM ticket_holds ORDER BY issue_key').all() as Array<{ issue_key: string }>).map((r) => r.issue_key);
+    const keys = issueKey !== undefined ? [issueKey] : (this.db.prepare('SELECT issue_key FROM ticket_notes UNION SELECT issue_key FROM ticket_holds UNION SELECT issue_key FROM tier_pins ORDER BY issue_key').all() as Array<{ issue_key: string }>).map((r) => r.issue_key);
     return keys.map((key) => {
       const notes = this.ticketNoteList(key); const held = this.isHeld(key); const closure = this.closure(key);
       const jobs = (this.db.prepare('SELECT job_id,state,dry_run,updated_at FROM jobs WHERE issue_key=? ORDER BY created_at, rowid').all(key) as Array<{ job_id: string; state: string; dry_run: number; updated_at: string }>);
@@ -293,7 +338,7 @@ export class SqliteJobStore {
         }
       }
       return ticketNotesSummarySchema.parse({ issue_key: key, notes, held, status, attempts: real.length, dry_runs: dry.length, latest_job_id: latest?.job_id ?? null, latest_state: latest?.state ?? null,
-        last_activity_at: latest?.updated_at ?? null, attempts_with_current_notes: withCurrent });
+        last_activity_at: latest?.updated_at ?? null, attempts_with_current_notes: withCurrent, tier_pins: this.tierPins(key) });
     });
   }
   /** Operator notes for one attempt, in the order they were given. Internal: never part of Job or events. */
@@ -317,6 +362,8 @@ export class SqliteJobStore {
       this.insert(valid);
       if (extra.not_before !== undefined || extra.auto_retry_count !== undefined) this.db.prepare('UPDATE jobs SET not_before=?, auto_retry_count=? WHERE job_id=?').run(extra.not_before ?? null, extra.auto_retry_count ?? 0, valid.job_id);
       this.insertNotes(valid.job_id, this.notes(previousJobId).filter((n) => n.source !== 'ticket')); this.attachTicketNotes(valid.job_id, valid.issue_key);
+      // A retry starts each ladder role at the step that finished the retried attempt (never below it), unless pinned.
+      this.insertSeeds(valid.job_id, previousJobId);
       return true;
     });
   }
@@ -489,8 +536,8 @@ export class SqliteJobStore {
     if (!parsed.success && candidate.message !== undefined) parsed = jobEventSchema.safeParse({ ...candidate, message: candidate.message.slice(0, 300) });
     if (!parsed.success) throw new AutosError('INVALID_OUTPUT', 'Progress event failed validation');
     const e = parsed.data;
-    const r = this.db.prepare(`INSERT INTO job_events(at,type,job_id,issue_key,state,stage,role,provider,from_provider,repair_round,outcome,code,elapsed_ms,count,message,resume_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(e.at, e.type, e.job_id, e.issue_key, e.state ?? null, e.stage ?? null, e.role ?? null, e.provider ?? null, e.from_provider ?? null, e.repair_round ?? null, e.outcome ?? null, e.code ?? null, e.elapsed_ms ?? null, e.count ?? null, e.message ?? null, e.resume_at ?? null);
+    const r = this.db.prepare(`INSERT INTO job_events(at,type,job_id,issue_key,state,stage,role,provider,from_provider,repair_round,outcome,code,elapsed_ms,count,message,resume_at,tier,model,effort) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(e.at, e.type, e.job_id, e.issue_key, e.state ?? null, e.stage ?? null, e.role ?? null, e.provider ?? null, e.from_provider ?? null, e.repair_round ?? null, e.outcome ?? null, e.code ?? null, e.elapsed_ms ?? null, e.count ?? null, e.message ?? null, e.resume_at ?? null, e.tier ?? null, e.model ?? null, e.effort ?? null);
     return jobEventSchema.parse({ ...e, event_id: Number(r.lastInsertRowid) });
   }
   /** Oldest-first events strictly after the cursor. */
@@ -544,7 +591,7 @@ function eventFromRow(row: Record<string, unknown>): JobEvent {
   return jobEventSchema.parse({ event_id: Number(row.event_id), at: String(row.at), type: String(row.type), job_id: row.job_id ?? null, issue_key: row.issue_key ?? null,
     ...optional('state', row.state), ...optional('stage', row.stage), ...optional('role', row.role), ...optional('provider', row.provider), ...optional('from_provider', row.from_provider),
     ...optional('repair_round', row.repair_round === null ? null : row.repair_round === undefined ? undefined : Number(row.repair_round)), ...optional('outcome', row.outcome), ...optional('code', row.code),
-    ...optional('elapsed_ms', row.elapsed_ms === null ? null : row.elapsed_ms === undefined ? undefined : Number(row.elapsed_ms)), ...optional('count', row.count === null ? null : row.count === undefined ? undefined : Number(row.count)), ...optional('message', row.message), ...optional('resume_at', row.resume_at) });
+    ...optional('elapsed_ms', row.elapsed_ms === null ? null : row.elapsed_ms === undefined ? undefined : Number(row.elapsed_ms)), ...optional('count', row.count === null ? null : row.count === undefined ? undefined : Number(row.count)), ...optional('message', row.message), ...optional('resume_at', row.resume_at), ...optional('tier', row.tier), ...optional('model', row.model), ...optional('effort', row.effort) });
 }
 
 /** Defense in depth: event messages are authored safe text, but strip anything resembling URLs, paths or secrets. */
@@ -647,7 +694,7 @@ export class FileArtifactStore {
 /** Every provider of a role's chain failed with a capacity code (see PAUSE_ERROR_CODES); carries what a resume needs. */
 class ChainLimitedError extends AutosError {
   constructor(code: ErrorCode, readonly role: AgentRole, readonly provider: ProviderResult['provider'], readonly retryAt: string | null, readonly unknownReset: boolean,
-    readonly swe: { startDigest: string | null; checklist: string | null; actions: TranscriptAction[] } | null) {
+    readonly swe: { startDigest: string | null; checklist: string | null; actions: TranscriptAction[] } | null, readonly providers: ProviderResult['provider'][] = [provider]) {
     super(code, `Every ${role} provider is rate limited`, { retryable: true });
   }
 }
@@ -673,6 +720,10 @@ const AUTO_RETRY_BASE_MS = 60_000;
 const AUTO_RETRY_CODES: readonly string[] = ['UPSTREAM', 'RATE_LIMIT', 'UNAVAILABLE', 'TIMEOUT'];
 /** Total role prompt budget (bytes). Truncation order: check output, diff body, instruction files. */
 export const PROMPT_BUDGET_BYTES = 180 * 1024;
+/** Failures that mean a tier was too weak (rather than unavailable): after the tier's last entry, a ladder role moves one tier up. */
+export const ESCALATE_ERROR_CODES = ['CONTEXT', 'INVALID_OUTPUT'] as const;
+/** Tier name of a chain entry for events (model and effort travel in their own event fields). */
+const chainLabel = (entry: ResolvedChainEntry): string => entry.tier ?? entry.provider;
 const HANDOFF_RESERVE_BYTES = 42 * 1024; // SWE prompts leave room for a handoff section appended on continuation
 const REASK_RESERVE_BYTES = 2 * 1024;
 /** Error carrying extra public-summary detail (never part of blocked_reason or events). */
@@ -749,7 +800,10 @@ export class WorkflowService implements WorkflowServicePort {
    */
   private gate(): WorkflowActivity['provider_limits'] {
     const store = this.jobs as SqliteJobStore; const providers = store.providerLimits(nowIso(this.deps.clock.now()));
-    const swe = this.deps.config.agents.swe; const chain = [swe.provider, ...(swe.fallbacks ?? []).map((f) => f.provider)];
+    // A ladder SWE role: the gate considers the SWE start tier (its floor, else its lowest tier). Pinned or triaged tickets that
+    // would start elsewhere still wait; once running, a fully limited tier pauses the attempt.
+    const swe = this.deps.config.agents.swe; const ladder = ladderOf(this.deps.config, 'swe');
+    const chain = ladder ? [...new Set(ladder[swe.min_index ?? 0]!.chain.map((c) => c.provider))] : [swe.provider, ...(swe.fallbacks ?? []).map((f) => f.provider)];
     const covered = chain.map((p) => providers.find((l) => l.provider === p));
     const active = covered.every((l) => l !== undefined);
     return { providers, gate_active: active, gate_until: active ? covered.map((l) => l!.until).sort()[0] ?? null : null };
@@ -798,22 +852,44 @@ export class WorkflowService implements WorkflowServicePort {
     this.jobEvent(job, { type: 'job_queued', state: 'QUEUED', message: dryRun ? 'Dry run queued' : 'Queued' });
     await this.writeManifest(job); return job;
   }
-  async revise(jobId: string, note: OperatorNoteRequest, author: string): Promise<Job> {
+  async revise(jobId: string, note: OperatorNoteRequest, author: string, pin?: Omit<TierPinRequest, 'role'>): Promise<Job> {
     jobIdSchema.parse(jobId);
     const time = nowIso(this.deps.clock.now()); const [stored] = this.parseNotes([note], author, time) as [OperatorNote];
-    const job = await (this.jobs as SqliteJobStore).createRevision(jobId, this.options.id?.() ?? randomUUID(), time, [stored]);
-    this.jobEvent(job, { type: 'job_queued', state: 'QUEUED', message: 'Queued as a revision' });
+    const attemptPin = pin === undefined ? undefined : this.validatePin({ ...pin, role: 'swe' }).label;
+    const job = await (this.jobs as SqliteJobStore).createRevision(jobId, this.options.id?.() ?? randomUUID(), time, [stored], attemptPin);
+    this.jobEvent(job, { type: 'job_queued', state: 'QUEUED', message: attemptPin ? `Queued as a revision (SWE pinned to ${attemptPin})` : 'Queued as a revision' });
     this.jobEvent(job, { type: 'revision_requested', state: 'QUEUED', message: `Revision ${job.revision} requested` });
     await this.writeManifest(job); return job;
   }
 
   /** Resolves the latest non-dry-run READY_FOR_HUMAN attempt of an issue and queues a revision of it. */
-  async reviseIssue(issueKey: string, note: OperatorNoteRequest, author: string): Promise<Job> {
+  async reviseIssue(issueKey: string, note: OperatorNoteRequest, author: string, pin?: Omit<TierPinRequest, 'role'>): Promise<Job> {
     const key = this.parseIssueKey(issueKey); const store = this.jobs as SqliteJobStore;
     const closed = store.closure(key); if (closed) throw new AutosError('CONFLICT', `Issue is closed (${closed.resolution})`);
     const latest = store.latestReady(key); if (!latest) throw new AutosError('NOT_FOUND', 'Issue has no READY_FOR_HUMAN attempt to revise');
-    return this.revise(latest.job_id, note, author);
+    return this.revise(latest.job_id, note, author, pin);
   }
+  /** Validates a pin request against the current configuration (tier exists, effort valid for its provider, not below the floor). */
+  private validatePin(request: TierPinRequest): { role: AgentRole; ref: TierStepRef; label: string; in_ladder: boolean } {
+    const parsed = tierPinRequestSchema.safeParse(request); if (!parsed.success) throw new AutosError('INVALID_INPUT', 'Invalid tier pin');
+    const ref: TierStepRef = { tier: parsed.data.tier, ...(parsed.data.effort ? { effort: parsed.data.effort } : {}) };
+    const placed = placePin(this.deps.config, parsed.data.role, ref);
+    if (!placed.ok) throw new AutosError('INVALID_INPUT', placed.reason);
+    return { role: parsed.data.role, ref, label: placed.label, in_ladder: placed.in_ladder };
+  }
+  async setTierPin(issueKey: string, pin: TierPinRequest, author: string): Promise<TierPinResult> {
+    const key = this.ticketProject(issueKey); const valid = this.validatePin(pin);
+    const parsedAuthor = operatorNoteSchema.shape.author.safeParse(author); if (!parsedAuthor.success) throw new AutosError('INVALID_INPUT', 'Invalid pin author');
+    const stored = (this.jobs as SqliteJobStore).setTierPin({ issue_key: key, role: valid.role, tier: valid.ref.tier, effort: valid.ref.effort ?? null, author: parsedAuthor.data, created_at: nowIso(this.deps.clock.now()) });
+    return { pin: stored, step: valid.label, in_ladder: valid.in_ladder };
+  }
+  async clearTierPins(issueKey: string, role?: AgentRole): Promise<number> {
+    const key = this.parseIssueKey(issueKey); if (role !== undefined && !roleSchema.safeParse(role).success) throw new AutosError('INVALID_INPUT', 'Invalid role');
+    return (this.jobs as SqliteJobStore).clearTierPins(key, role);
+  }
+  async tierPins(issueKey: string): Promise<TierPin[]> { return (this.jobs as SqliteJobStore).tierPins(this.parseIssueKey(issueKey)); }
+  /** An attempt's tier state (per-role ladder, start, current step, escalations, triage), or null for plain chains. */
+  tierStateOf(jobId: string): TierState | null { return (this.jobs as SqliteJobStore).tierState(jobIdSchema.parse(jobId)); }
   async closure(issueKey: string): Promise<IssueClosure | null> { return (this.jobs as SqliteJobStore).closure(this.parseIssueKey(issueKey)); }
   private parseIssueKey(issueKey: string): string {
     const parsed = issueKeySchema.safeParse(issueKey); if (!parsed.success) throw new AutosError('INVALID_INPUT', 'Invalid issue key'); return parsed.data;
@@ -1229,6 +1305,8 @@ export class WorkflowService implements WorkflowServicePort {
         await this.write('baseline-checks.json', JSON.stringify({ schema_version: 1, candidate_digest: baseline.digest, recorded_at: nowIso(this.deps.clock.now()), error_code: safeError(error).code, note: 'Baseline checks of the parent commit could not be recorded as valid evidence' }, null, 2), job);
       }
     }
+    // Model tiers: each ladder role's start step for this attempt (kept as is on resume).
+    if (!(resume && store.tierState(job.job_id))) await this.initTiers(job, workspace, issue, !resume, signal);
     const parentReview = parent ? await this.parentReviewSummary(parent.job_id) : '';
     const sweNotes = (nonce: string): string => sweContext(notes, parent, parentReview, job.revision ?? 0, nonce);
     const policy = pathPolicyText(repo);
@@ -1361,13 +1439,22 @@ export class WorkflowService implements WorkflowServicePort {
         await this.write('changes.patch', patchText(finalCandidate.diff), job);
         // Persist commit/push evidence before the job becomes terminal, so a client that sees READY_FOR_HUMAN
         // never reads an incomplete manifest; it is rewritten below with the terminal status.
-        await this.writeSummary(job, `Repository: ${repoId}\nBase branch: ${workspace.development_branch}\nBase SHA: ${workspace.base_sha}\nFeature branch: ${workspace.feature_branch}\nCommit SHA: ${commit.commit_sha}\nCandidate digest: ${commit.candidate_digest}\nRepair rounds used: ${repairs}\nChanged files: ${commit.paths.join(', ')}\n${parent ? `Revision: ${job.revision ?? 1} of parent job ${parent.job_id}; this commit builds on parent commit ${parent.commit_sha}\n` : ''}${notes.length ? `Operator notes: ${notes.length} (see operator-notes.json)\n` : ''}Required checks: ${finalChecks.checks.filter((check) => check.required).map((check) => `${check.name}=${check.status}`).join(', ')}\nQA: ${finalQa.status}\nReview: ${finalReview.status}\n${providerSummary(rounds)}Push: ${pushOutcome}\nLimitations: no pull request, merge, or deployment was performed.`);
+        await this.writeSummary(job, `Repository: ${repoId}\nBase branch: ${workspace.development_branch}\nBase SHA: ${workspace.base_sha}\nFeature branch: ${workspace.feature_branch}\nCommit SHA: ${commit.commit_sha}\nCandidate digest: ${commit.candidate_digest}\nRepair rounds used: ${repairs}\nChanged files: ${commit.paths.join(', ')}\n${parent ? `Revision: ${job.revision ?? 1} of parent job ${parent.job_id}; this commit builds on parent commit ${parent.commit_sha}\n` : ''}${notes.length ? `Operator notes: ${notes.length} (see operator-notes.json)\n` : ''}Required checks: ${finalChecks.checks.filter((check) => check.required).map((check) => `${check.name}=${check.status}`).join(', ')}\nQA: ${finalQa.status}\nReview: ${finalReview.status}\n${providerSummary(rounds)}${tierSummary(store.tierState(job.job_id))}Push: ${pushOutcome}\nLimitations: no pull request, merge, or deployment was performed.`);
         await this.updateManifest(job, { candidate_digest: commit.candidate_digest, base_sha: workspace.base_sha, commit_sha: commit.commit_sha, feature_branch: workspace.feature_branch, push_status: pushStatus, status: 'READY_FOR_HUMAN' });
         await stage('READY_FOR_HUMAN', { commit_sha: commit.commit_sha }); return;
       }
-      if (repairs >= repairLimit) throw new DetailedError('CHECK_FAILED', `Required evidence failed: ${gate.reasons.join(', ')}`, checkDetail(checks));
-      repairs++; await stage('REVISING', { repair_round: repairs });
-      this.jobEvent(job, { type: 'repair_round_started', repair_round: repairs, message: `Repair round ${repairs} started` }); enter('repair');
+      // Ladder SWE: a failed candidate moves the next SWE run one step up. Escalation rounds are bounded by the ladder and do not
+      // consume max_repair_rounds; once SWE is at its top step, max_repair_rounds applies as before.
+      const escalation = await this.escalateRole(job, 'swe', `${gate.reasons.join(', ')}`.slice(0, 200) || 'required evidence failed', repairs);
+      if (!escalation && repairs >= repairLimit) throw new DetailedError('CHECK_FAILED', `Required evidence failed: ${gate.reasons.join(', ')}`, checkDetail(checks));
+      if (escalation) {
+        await stage('REVISING');
+        this.jobEvent(job, { type: 'repair_round_started', repair_round: repairs, tier: escalation.to, message: `Escalation round: SWE ${escalation.from} -> ${escalation.to} (${gate.reasons.join(', ')})` }); enter('repair');
+        round.escalation = { from: escalation.from, to: escalation.to }; await flushRounds();
+      } else {
+        repairs++; await stage('REVISING', { repair_round: repairs });
+        this.jobEvent(job, { type: 'repair_round_started', repair_round: repairs, message: `Repair round ${repairs} started` }); enter('repair');
+      }
       sweAttempts = []; const implementation = await callRole('swe', 'write', this.prompt(job, 'swe', issue, { diff: candidate.diff, instr, paths: null, policy, checks, feedback: (checksJson) => JSON.stringify({ candidate_digest: candidate.digest, gate_reasons: gate.reasons, checks: JSON.parse(checksJson), qa, review }, null, 2), task: `Repair the candidate using the actual current evidence below. Address failed checks, QA evidence, and reviewer findings. Do not commit or push.${SWE_RULES}`, trusted: sweNotes }), sweAttempts, undefined, undefined, candidate.digest, { phase: 'repair', repairEvidence: { checks, qa, review } });
       await this.appendImplementationNotes(job, implementation, repairs);
       await stage('IMPLEMENTING');
@@ -1427,7 +1514,8 @@ export class WorkflowService implements WorkflowServicePort {
    */
   private async runRole(job: Job, workspace: GitWorkspace, role: 'swe'|'qa'|'reviewer', access: 'read'|'write', prompt: string, signal?: AbortSignal, opts: { attempts?: ProviderAttempt[]; baselineDigest?: string; validate?: ((result: ProviderResult, hasNext: boolean) => void | Promise<void>) | undefined; resume?: SweResume | undefined; repairEvidence?: RepairEvidence | undefined } = {}): Promise<ProviderResult> {
     const roleConfig = this.deps.config.agents[role];
-    const chain: Array<{ provider: ProviderResult['provider']; model?: string }> = [{ provider: roleConfig.provider, ...(roleConfig.model ? { model: roleConfig.model } : {}) }, ...(roleConfig.fallbacks ?? []).map((f) => ({ provider: f.provider, ...(f.model ? { model: f.model } : {}) }))];
+    // The chain is the current ladder step (step + stand-ins) for a ladder role, else the configured provider + fallbacks.
+    let step = this.stepChain(job, role); let chain = step.chain;
     const sink = opts.attempts ?? [];
     const repairContext = opts.repairEvidence ? repairContextText(prompt, opts.repairEvidence) : null;
     const swe: SweState | undefined = role === 'swe' ? { startDigest: opts.baselineDigest, checklist: null, handoff: undefined, captured: false, continued: false, actions: [], repairContext } : undefined;
@@ -1439,22 +1527,28 @@ export class WorkflowService implements WorkflowServicePort {
       if (changed || r.checklist !== null) swe.handoff = { provider: r.provider, code: r.code, checklist: r.checklist, paths: (candidate.incremental ?? candidate).paths, diff: (candidate.incremental ?? candidate).diff, actions: r.actions, repairContext };
       swe.startDigest = candidate.digest;
     }
-    const codes: string[] = []; const resets = new Map<string, string>();
+    let codes: string[] = []; let resets = new Map<string, string>();
     for (let index = 0; index < chain.length; index++) {
-      const entry = chain[index]!; const hasNext = index + 1 < chain.length;
+      const entry = chain[index]!; const lastInStep = index + 1 >= chain.length;
+      const canEscalate = this.canEscalate(job, role); const hasNext = !lastInStep || canEscalate;
       const stageNow = this.openStages.get(job.job_id);
       if (swe) { swe.captured = false; swe.continued = false; }
       const startedAt = Date.now(); const outcome = await this.runProviderAttempt(job, workspace, role, access, prompt, entry, index, roleConfig.timeout_ms, signal, opts.validate ? (r) => opts.validate!(r, hasNext) : undefined, swe);
       const sweFlags = swe ? { continued_from_handoff: swe.continued, handoff_captured: swe.captured } : {};
+      const tierFields = entry.tier !== null ? { tier: entry.tier, effort: entry.effort ?? null } : {};
       if (outcome.ok) {
-        sink.push({ role, provider: entry.provider, model: entry.model ?? null, chain_index: index, status: 'SUCCEEDED', error_code: null, elapsed_ms: Date.now() - startedAt, fell_back: false, ...sweFlags });
+        sink.push({ role, provider: entry.provider, model: entry.model ?? null, chain_index: index, status: 'SUCCEEDED', error_code: null, elapsed_ms: Date.now() - startedAt, fell_back: false, ...sweFlags, ...tierFields });
         (this.jobs as SqliteJobStore).resetPauseStreak(job.job_id);
         if ((this.jobs as SqliteJobStore).clearProviderLimits(nowIso(this.deps.clock.now()), entry.provider) > 0) this.observeGate(`${entry.provider} run succeeded`);
         return outcome.result;
       }
       const code = safeError(outcome.error).code; codes.push(code);
       if (outcome.error instanceof ProviderAttemptError && outcome.error.retryAt) resets.set(entry.provider, outcome.error.retryAt);
-      let fallBack = hasNext && (FALLBACK_ERROR_CODES as readonly string[]).includes(code) && !signal?.aborted;
+      // Every fallback-eligible failure first moves to the next entry of the same tier. When the tier's last entry fails with
+      // CONTEXT / INVALID_OUTPUT (the tier was too weak), a ladder role moves to its next tier. Provider/limit failures never
+      // escalate: a fully limited tier may pause and resumes on the same tier.
+      const escalateNow = lastInStep && canEscalate && (ESCALATE_ERROR_CODES as readonly string[]).includes(code) && !signal?.aborted;
+      let fallBack = (escalateNow || (!lastInStep && (FALLBACK_ERROR_CODES as readonly string[]).includes(code))) && !signal?.aborted;
       let refused = false; let continuing = false;
       if (fallBack && swe) {
         const candidate = await retryInfrastructure(() => this.deps.git.inspectCandidate(workspace, signal), signal);
@@ -1467,39 +1561,147 @@ export class WorkflowService implements WorkflowServicePort {
         swe.startDigest = candidate.digest;
       }
       const status = outcome.status === 'TIMED_OUT' ? 'TIMED_OUT' : code === 'CANCELLED' ? 'CANCELLED' : 'FAILED';
-      sink.push({ role, provider: entry.provider, model: entry.model ?? null, chain_index: index, status, error_code: code as ProviderAttempt['error_code'], elapsed_ms: Date.now() - startedAt, fell_back: fallBack, ...sweFlags });
+      sink.push({ role, provider: entry.provider, model: entry.model ?? null, chain_index: index, status, error_code: code as ProviderAttempt['error_code'], elapsed_ms: Date.now() - startedAt, fell_back: fallBack, ...sweFlags, ...tierFields });
       if (!fallBack) {
         if (refused) throw new AutosError(code, 'SWE provider failed after modifying the workspace; fallback refused');
-        // The whole chain hit provider capacity (at least one RATE_LIMIT, the rest RATE_LIMIT/UPSTREAM): the caller may pause instead of blocking.
-        if (!hasNext && !signal?.aborted && this.canPause(job) && codes.length === chain.length && codes.includes('RATE_LIMIT') && codes.every((c) => (PAUSE_ERROR_CODES as readonly string[]).includes(c))) {
+        // The whole step chain hit provider capacity (at least one RATE_LIMIT, the rest RATE_LIMIT/UPSTREAM): the caller may pause instead of blocking.
+        if (lastInStep && !signal?.aborted && this.canPause(job) && codes.length === chain.length && codes.includes('RATE_LIMIT') && codes.every((c) => (PAUSE_ERROR_CODES as readonly string[]).includes(c))) {
           const known = [...resets.values()].sort();
           let sweInfo: ChainLimitedError['swe'] = null;
           if (swe) {
             // The digest the interrupted SWE invocation originally started from (kept across resumes), so the resumed SWE gets a handoff for any partial work.
             sweInfo = { startDigest: opts.resume ? opts.resume.startDigest : opts.baselineDigest ?? null, checklist: swe.checklist, actions: swe.actions };
           }
-          throw new ChainLimitedError('RATE_LIMIT', role, entry.provider, known[0] ?? null, resets.size < chain.length, sweInfo);
+          throw new ChainLimitedError('RATE_LIMIT', role, entry.provider, known[0] ?? null, resets.size < chain.length, sweInfo, chain.map((c) => c.provider));
         }
         throw outcome.error;
       }
-      this.jobEvent(job, { type: 'provider_fallback', ...(stageNow ? { stage: stageNow } : {}), role, provider: chain[index + 1]!.provider, from_provider: entry.provider, repair_round: job.repair_round, code, message: continuing ? 'continuing with handoff' : 'falling back to next provider' });
+      if (escalateNow) {
+        const escalation = await this.escalateRole(job, role, `${role} ${code} at ${step.label ?? entry.provider}`, job.repair_round);
+        if (escalation) {
+          step = this.stepChain(job, role); chain = step.chain; codes = []; resets = new Map();
+          this.jobEvent(job, { type: 'provider_fallback', ...(stageNow ? { stage: stageNow } : {}), role, provider: chain[0]!.provider, from_provider: entry.provider, repair_round: job.repair_round, code, tier: escalation.to, message: `escalating ${escalation.from} -> ${escalation.to}${continuing ? ' with handoff' : ''}` });
+          index = -1; continue;
+        }
+      }
+      this.jobEvent(job, { type: 'provider_fallback', ...(stageNow ? { stage: stageNow } : {}), role, provider: chain[index + 1]!.provider, from_provider: entry.provider, repair_round: job.repair_round, code, ...(chain[index + 1]!.tier !== null ? { tier: chainLabel(chain[index + 1]!) } : {}), message: continuing ? 'continuing with handoff' : 'falling back to next provider' });
     }
     throw new AutosError('INTERNAL', `${role} provider chain was empty`);
   }
-  private async runProviderAttempt(job: Job, workspace: GitWorkspace, role: 'swe'|'qa'|'reviewer', access: 'read'|'write', prompt: string, entry: { provider: ProviderResult['provider']; model?: string }, chainIndex: number, timeoutMs: number, signal: AbortSignal | undefined, validate?: (result: ProviderResult) => void | Promise<void>, swe?: SweState): Promise<{ ok: true; result: ProviderResult } | { ok: false; error: unknown; status?: string }> {
+  // ---- Model tiers ----
+  /** The current provider chain of a role for this attempt: its ladder step (step + stand-ins) or the configured chain. */
+  private stepChain(job: Job, role: AgentRole): { label: string | null; chain: ResolvedChainEntry[] } {
+    const state = (this.jobs as SqliteJobStore).tierState(job.job_id)?.roles[role];
+    if (state) {
+      const label = state.steps[state.current_index]!; const step = resolveStep(this.deps.config, role, label);
+      if (!step) throw new AutosError('INVALID_CONFIG', `Model tier step ${label} of ${role} is no longer configured`);
+      return { label, chain: step.chain };
+    }
+    const roleConfig = this.deps.config.agents[role];
+    return { label: null, chain: [{ provider: roleConfig.provider, ...(roleConfig.model ? { model: roleConfig.model } : {}), tier: null }, ...(roleConfig.fallbacks ?? []).map((f) => ({ provider: f.provider, ...(f.model ? { model: f.model } : {}), tier: null }))] };
+  }
+  private canEscalate(job: Job, role: AgentRole): boolean {
+    const state = (this.jobs as SqliteJobStore).tierState(job.job_id)?.roles[role]; return Boolean(state && state.current_index + 1 < state.steps.length);
+  }
+  /** Moves a ladder role one step up (durably), with an event and refreshed tiers.json; null at the top or for plain roles. */
+  private async escalateRole(job: Job, role: AgentRole, reason: string, repairRound: number): Promise<{ from: string; to: string } | null> {
+    const store = this.jobs as SqliteJobStore; const state = store.tierState(job.job_id); if (!state) return null;
+    const escalation = escalateTier(state.roles[role], reason, nowIso(this.deps.clock.now()), repairRound); if (!escalation) return null;
+    store.saveTierState(job.job_id, state);
+    this.jobEvent(job, { type: 'tier_escalated', role, tier: escalation.to, repair_round: job.repair_round, message: `${role} escalated ${escalation.from} -> ${escalation.to}: ${reason}`.slice(0, 300) });
+    try { await this.flushTiers(job); } catch { /* the state is durable in the database; evidence is best effort */ }
+    return escalation;
+  }
+  private async flushTiers(job: Job): Promise<void> {
+    const state = (this.jobs as SqliteJobStore).tierState(job.job_id); if (!state) return;
+    const roles = Object.fromEntries(Object.entries(state.roles).map(([role, st]) => [role, st ? { ...st, start: st.steps[st.start_index], current: st.steps[st.current_index] } : st]));
+    await this.write('tiers.json', JSON.stringify({ schema_version: 1, job_id: job.job_id, issue_key: job.issue_key, roles, triage: state.triage }, null, 2), job);
+  }
+  /**
+   * Decides each ladder role's start step for a new attempt: attempt pin (revise --tier) > ticket pin > the step that
+   * finished the previous attempt (revision parent / retried attempt) > triage (when enabled and allowed) > lowest step,
+   * never below the role's floor. Plain roles stay on their provider chain unless pinned.
+   */
+  private async initTiers(job: Job, workspace: GitWorkspace, issue: Parameters<typeof triagePrompt>[2], allowTriage: boolean, signal?: AbortSignal): Promise<void> {
+    const store = this.jobs as SqliteJobStore; const config = this.deps.config;
+    const seeds = store.tierSeeds(job.job_id); const pins = store.tierPins(job.issue_key);
+    const inputs = Object.fromEntries(ROLE_NAMES.map((role) => {
+      const attempt = seeds.find((s) => s.role === role && s.source === 'attempt_pin'); const previous = seeds.find((s) => s.role === role && s.source === 'previous');
+      const pin = pins.find((p) => p.role === role);
+      return [role, {
+        ...(attempt && parseTierStep(attempt.step) ? { attemptPin: parseTierStep(attempt.step)! } : {}),
+        ...(pin ? { ticketPin: { ref: { tier: pin.tier, ...(pin.effort ? { effort: pin.effort } : {}) }, author: pin.author } } : {}),
+        ...(previous ? { previous: previous.step } : {}),
+      }];
+    })) as Record<AgentRole, Parameters<typeof selectStart>[2]>;
+    const needs = ROLE_NAMES.filter((role) => ladderOf(config, role) && (ladderOf(config, role)!.length - (config.agents[role].min_index ?? 0)) > 1 && selectStart(config, role, inputs[role])?.start_source === 'lowest');
+    let triage: TierState['triage'] = null; let choice: TriageChoice = {}; let failed: string | undefined;
+    if (needs.length && config.triage?.enabled && allowTriage) {
+      const outcome = await this.runTriage(job, workspace, issue, needs, signal);
+      triage = outcome.record; choice = outcome.choice; failed = outcome.record.status === 'FAILED' ? outcome.record.code ?? 'FAILED' : undefined;
+    }
+    const roles: TierState['roles'] = {};
+    for (const role of ROLE_NAMES) {
+      const st = selectStart(config, role, { ...inputs[role], ...(choice[role] ? { triage: choice[role] } : {}), ...(failed && needs.includes(role) ? { triageFailed: failed } : {}) });
+      if (st) roles[role] = st;
+    }
+    if (!Object.keys(roles).length && !triage) return;
+    store.saveTierState(job.job_id, { schema_version: 1, roles, triage });
+    for (const [role, st] of Object.entries(roles) as Array<[AgentRole, RoleTierState]>) {
+      this.jobEvent(job, { type: 'tier_selected', role, tier: st.steps[st.start_index]!, outcome: st.start_source.toUpperCase(), message: `${role} starts at ${st.steps[st.start_index]} (${st.start_source}): ${st.start_reason}`.slice(0, 300) });
+    }
+    await this.flushTiers(job);
+  }
+  /**
+   * One read-only triage call (QA sandbox profile, no source write) on the configured triage tier, trying its entries in
+   * order on provider-side failures. Malformed output or any other failure falls back to the lowest tier.
+   */
+  private async runTriage(job: Job, workspace: GitWorkspace, issue: Parameters<typeof triagePrompt>[2], roles: AgentRole[], signal?: AbortSignal): Promise<{ choice: TriageChoice; record: NonNullable<TierState['triage']> }> {
+    const config = this.deps.config; const t = config.triage!; const started = Date.now();
+    const fail = (code: string) => ({ choice: {}, record: { step: t.tier, status: 'FAILED' as const, code, requested: {}, elapsed_ms: Date.now() - started } });
+    const entries = Object.hasOwn(config.model_tiers, t.tier) ? config.model_tiers[t.tier]! : null;
+    if (!entries) return fail('INVALID_CONFIG');
+    const prompt = triagePrompt(config, roles, issue, randomBytes(16).toString('hex'));
+    let lastCode = 'TOOL';
+    for (const [index, entry] of entries.entries()) {
+      const invocationId = randomUUID(); const startedAt = new Date(); const callClock = Date.now();
+      const record = (status: ProviderCall['status'], code: string | null) => this.recordCall({ job_id: job.job_id, role: 'qa', provider: entry.provider, model: entry.model ?? null, chain_index: index, invocation_id: invocationId, started_at: startedAt, elapsed_ms: Date.now() - callClock, status, error_code: code, continued: false, repair_round: job.repair_round, tier: t.tier, effort: entry.effort ?? null, purpose: 'triage' });
+      try {
+        const paths = await this.deps.artifacts.prepareRole(job.job_id, 'qa', invocationId, prompt);
+        const result = await this.deps.runner.runRole({ job_id: job.job_id, issue_key: job.issue_key, provider: entry.provider, role: 'qa', ...(entry.model ? { model: entry.model } : {}), ...(entry.effort ? { effort: entry.effort } : {}), cwd: workspace.directory, prompt_path: paths.prompt_path, transcript_path: paths.transcript_path, timeout_ms: t.timeout_ms, source_access: 'read', auth_profile: config.providers[entry.provider].auth_profile }, signal);
+        if (result.status !== 'SUCCEEDED' || result.exit_code !== 0) {
+          const code = result.error_code ?? (result.status === 'TIMED_OUT' ? 'TIMEOUT' : 'TOOL');
+          await record(result.status === 'TIMED_OUT' ? 'TIMED_OUT' : result.status === 'CANCELLED' ? 'CANCELLED' : 'FAILED', code);
+          if (code === 'CANCELLED') throw new AutosError('CANCELLED', 'Workflow cancelled');
+          lastCode = code;
+          if ((FALLBACK_ERROR_CODES as readonly string[]).includes(code)) continue;
+          return fail(code);
+        }
+        const choice = parseTriage(result.result, roles); await record('SUCCEEDED', null);
+        return { choice, record: { step: t.tier, status: 'CHOSEN', code: null, requested: Object.fromEntries(Object.entries(choice).map(([r, c]) => [r, c!.index])), elapsed_ms: Date.now() - started } };
+      } catch (error) {
+        if (signal?.aborted || (error instanceof AutosError && error.code === 'CANCELLED')) throw error;
+        const code = safeError(error).code; await record('FAILED', code); return fail(code);
+      }
+    }
+    return fail(lastCode);
+  }
+  private async runProviderAttempt(job: Job, workspace: GitWorkspace, role: 'swe'|'qa'|'reviewer', access: 'read'|'write', prompt: string, entry: ResolvedChainEntry, chainIndex: number, timeoutMs: number, signal: AbortSignal | undefined, validate?: (result: ProviderResult) => void | Promise<void>, swe?: SweState): Promise<{ ok: true; result: ProviderResult } | { ok: false; error: unknown; status?: string }> {
     const provider = entry.provider; const providerConfig = this.deps.config.providers[provider];
     const startedAt = Date.now(); let lastStatus: string | undefined;
     const stageNow = this.openStages.get(job.job_id);
-    this.jobEvent(job, { type: 'role_started', ...(stageNow ? { stage: stageNow } : {}), role, provider, repair_round: job.repair_round });
+    // Sanitized call identity for events: step label, model and effort (no prompt, path or secret).
+    const callFields = { ...(entry.tier !== null ? { tier: chainLabel(entry) } : {}), ...(entry.model ? { model: entry.model } : {}), ...(entry.effort ? { effort: entry.effort } : {}) };
+    this.jobEvent(job, { type: 'role_started', ...(stageNow ? { stage: stageNow } : {}), role, provider, repair_round: job.repair_round, ...callFields });
     let failure: unknown; let currentCall: ((status: ProviderCall['status'], errorCode: string | null) => Promise<void>) | undefined;
     try {
       const spawn = (promptText: string) => retryInfrastructure(async () => {
         const handoff = swe?.handoff; if (swe && handoff) swe.continued = true;
         const invocationId = randomUUID(); const callStartedAt = new Date(); const callClock = Date.now();
         const privatePaths = await this.deps.artifacts.prepareRole(job.job_id, role, invocationId, handoff ? `${promptText}\n\n${handoffSection(handoff)}` : promptText);
-        const record = async (status: ProviderCall['status'], errorCode: string | null): Promise<void> => this.recordCall({ job_id: job.job_id, role, provider, model: entry.model ?? null, chain_index: chainIndex, invocation_id: invocationId, started_at: callStartedAt, elapsed_ms: Date.now() - callClock, status, error_code: errorCode, continued: handoff !== undefined && swe !== undefined, repair_round: job.repair_round });
+        const record = async (status: ProviderCall['status'], errorCode: string | null): Promise<void> => this.recordCall({ job_id: job.job_id, role, provider, model: entry.model ?? null, chain_index: chainIndex, invocation_id: invocationId, started_at: callStartedAt, elapsed_ms: Date.now() - callClock, status, error_code: errorCode, continued: handoff !== undefined && swe !== undefined, repair_round: job.repair_round, tier: entry.tier, effort: entry.effort ?? null });
         currentCall = record;
-        const request = { job_id: job.job_id, issue_key: job.issue_key, provider, role, ...(entry.model ? { model: entry.model } : {}), cwd: workspace.directory, prompt_path: privatePaths.prompt_path,
+        const request = { job_id: job.job_id, issue_key: job.issue_key, provider, role, ...(entry.model ? { model: entry.model } : {}), ...(entry.effort ? { effort: entry.effort } : {}), cwd: workspace.directory, prompt_path: privatePaths.prompt_path,
           transcript_path: privatePaths.transcript_path, timeout_ms: timeoutMs, source_access: access, auth_profile: providerConfig.auth_profile, ...(this.toolchains.get(job.job_id) ? { toolchain: this.toolchains.get(job.job_id)! } : {}) };
         let result: ProviderResult;
         try {
@@ -1550,7 +1752,7 @@ export class WorkflowService implements WorkflowServicePort {
     finally {
       const code = failure === undefined ? undefined : safeError(failure).code;
       const status = lastStatus && /^[A-Z_]{1,40}$/.test(lastStatus) ? lastStatus : undefined;
-      this.jobEvent(job, { type: 'role_finished', ...(stageNow ? { stage: stageNow } : {}), role, provider, repair_round: job.repair_round,
+      this.jobEvent(job, { type: 'role_finished', ...(stageNow ? { stage: stageNow } : {}), role, provider, repair_round: job.repair_round, ...callFields,
         outcome: failure === undefined ? (status ?? 'SUCCEEDED') : (status ?? (code === 'CANCELLED' ? 'CANCELLED' : 'FAILED')), elapsed_ms: Date.now() - startedAt, ...(code ? { code } : {}) });
     }
   }
@@ -1582,8 +1784,7 @@ export class WorkflowService implements WorkflowServicePort {
     if (!paused) throw limited ?? new AutosError(code, `${role} stage did not complete successfully`); // e.g. an operator cancel won the race
     if (limited) {
       // Durable limit record: new tickets whose SWE chain is fully limited wait until the earliest expiry (see gate()).
-      const roleConfig = this.deps.config.agents[role];
-      store.recordProviderLimits([roleConfig.provider, ...(roleConfig.fallbacks ?? []).map((f) => f.provider)], resumeAt, nowIso(now), job.job_id);
+      store.recordProviderLimits(limited.providers, resumeAt, nowIso(now), job.job_id);
       this.observeGate('limits recorded');
     }
     const after = await this.require(job.job_id);
@@ -1615,10 +1816,10 @@ export class WorkflowService implements WorkflowServicePort {
     try { await runner.releaseJobScratch(jobId); } catch { /* the supervisor's startup sweep removes leftovers */ }
   }
   /** Best effort: call.json is evidence for later evaluation and must never fail or delay the job. */
-  private async recordCall(input: { job_id: string; role: 'swe'|'qa'|'reviewer'; provider: ProviderResult['provider']; model: string | null; chain_index: number; invocation_id: string; started_at: Date; elapsed_ms: number; status: ProviderCall['status']; error_code: string | null; continued: boolean; repair_round: number }): Promise<void> {
+  private async recordCall(input: { job_id: string; role: 'swe'|'qa'|'reviewer'; provider: ProviderResult['provider']; model: string | null; chain_index: number; invocation_id: string; started_at: Date; elapsed_ms: number; status: ProviderCall['status']; error_code: string | null; continued: boolean; repair_round: number; tier?: string | null; effort?: ProviderCall['effort']; purpose?: 'role' | 'triage' }): Promise<void> {
     try {
-      const { started_at, continued, ...rest } = input;
-      const call = providerCallSchema.parse({ schema_version: 1, ...rest, started_at: started_at.toISOString(), continued_from_handoff: continued });
+      const { started_at, continued, tier, effort, purpose, ...rest } = input;
+      const call = providerCallSchema.parse({ schema_version: 1, ...rest, started_at: started_at.toISOString(), continued_from_handoff: continued, tier: tier ?? null, effort: effort ?? null, purpose: purpose ?? 'role' });
       await this.deps.artifacts.writeCall?.(call);
     } catch { /* never fail the job over dataset evidence */ }
   }
@@ -1848,6 +2049,16 @@ function sanitizeNote(value: string): string {
 }
 
 /** One line per role: the provider that produced the accepted result and any fallbacks (codes only, no transcript content). */
+/** Which ladder step each role started at (and why) and which step finished the job. */
+function tierSummary(state: TierState | null): string {
+  if (!state) return '';
+  const lines = (Object.entries(state.roles) as Array<[AgentRole, RoleTierState | undefined]>).filter((e): e is [AgentRole, RoleTierState] => Boolean(e[1])).map(([role, st]) => {
+    const start = st.steps[st.start_index]; const end = st.steps[st.current_index];
+    return `${role}: ${start === end ? `solved at ${end}` : `started at ${start}, solved at ${end} after ${st.escalations.length} escalation${st.escalations.length === 1 ? '' : 's'}`} (start: ${st.start_source})`;
+  });
+  const triage = state.triage ? [`triage ${state.triage.step}: ${state.triage.status}${state.triage.code ? ` (${state.triage.code})` : ''}`] : [];
+  return lines.length || triage.length ? `Model tiers (see tiers.json):\n${[...lines, ...triage].map((l) => `- ${l}`).join('\n')}\n` : '';
+}
 function providerSummary(rounds: Array<Record<string, unknown>>): string {
   const all = rounds.flatMap((r) => Array.isArray(r.provider_attempts) ? r.provider_attempts as ProviderAttempt[] : []);
   const label: Record<string, string> = { swe: 'SWE', qa: 'QA', reviewer: 'Reviewer' }; const lines: string[] = [];
@@ -1858,7 +2069,7 @@ function providerSummary(rounds: Array<Record<string, unknown>>): string {
     const failed: ProviderAttempt[] = [];
     for (let i = end - 1; i >= 0 && mine[i]!.chain_index < mine[i + 1]!.chain_index; i--) failed.unshift(mine[i]!);
     const accepted = mine[end]!;
-    lines.push(`${label[role]}: ${accepted.provider}${failed.length ? ` (fallback after ${failed.map((a) => `${a.provider} ${a.error_code ?? 'FAILED'}`).join(', ')})` : ''}`);
+    lines.push(`${label[role]}: ${accepted.provider}${accepted.tier ? ` [${accepted.tier}: ${accepted.model ?? 'default model'}${accepted.effort ? ` ${accepted.effort}` : ''}]` : ''}${failed.length ? ` (fallback after ${failed.map((a) => `${a.provider} ${a.error_code ?? 'FAILED'}`).join(', ')})` : ''}`);
   }
   return lines.length ? `Providers:\n${lines.map((l) => `- ${l}`).join('\n')}\n` : '';
 }

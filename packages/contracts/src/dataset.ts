@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ERROR_CODES } from './errors.js';
 import { branchNameSchema, gitShaSchema, issueKeySchema, jobIdSchema, jobStateSchema, providerSchema, roleSchema, timestampSchema } from './domain.js';
 import { FALLBACK_ERROR_CODES } from './jobs.js';
+import { effortSchema } from './config.js';
 
 /**
  * Per provider invocation metadata written by the workflow next to the private prompt/transcript
@@ -23,6 +24,11 @@ export const providerCallSchema = z.strictObject({
   error_code: z.enum(ERROR_CODES).nullable(),
   /** SWE: this call continued a predecessor's partial work (handoff). */
   continued_from_handoff: z.boolean(),
+  /** Ladder roles and triage: model tier name, and the reasoning effort passed to the CLI (null = CLI default). */
+  tier: z.string().max(40).nullable().optional(),
+  effort: effortSchema.nullable().optional(),
+  /** 'triage' for the start-step triage call (runs in the read-only QA profile); absent for role calls. */
+  purpose: z.enum(['role', 'triage']).optional(),
 });
 export type ProviderCall = z.infer<typeof providerCallSchema>;
 
@@ -68,6 +74,8 @@ export const datasetRecordSchema = z.strictObject({
   baseline_checks: z.unknown().nullable(),
   qa: z.unknown().nullable(),
   review: z.unknown().nullable(),
+  /** tiers.json: per-role ladder, start step and source (pin, triage, previous attempt, lowest), escalations and the triage call. */
+  tiers: z.unknown().nullable().default(null),
   /** effective-instructions.md and precedents.md text. */
   instructions: z.string().nullable(),
   precedents: z.string().nullable(),

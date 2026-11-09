@@ -427,7 +427,7 @@ export class DockerRunner implements RunnerPort {
         ...(toolchain && scratch ? [...toolchainMounts(toolchain), ...mount(scratch, TOOLCHAIN_MOUNTS.scratch, 'rw'), ...(cacheRoot ? mount(cacheRoot, TOOLCHAIN_MOUNTS.mavenCache, 'ro') : []), ...envArgs(this.roleToolchainEnv(toolchain, request.toolchain!.tomcat !== null, cacheRoot !== undefined))] : []),
         ...(envPath ? ['--env-file', envPath] : []), '--workdir', '/workspace', this.options.workerImage,
         '--provider', request.provider, '--role', request.role,
-        ...(request.model ? ['--model', request.model] : []), '--auth-profile', request.auth_profile,
+        ...(request.model ? ['--model', request.model] : []), ...(request.effort ? ['--effort', request.effort] : []), '--auth-profile', request.auth_profile,
         '--prompt', '/run/autos/prompt.txt', '--transcript', `/run/autos/output/${request.transcript_path.split(sep).at(-1)}`,
       ];
       try {
@@ -848,8 +848,8 @@ function translatePath(path: string, fromRoot: string, toRoot: string): string {
 }
 
 function translateRequest(request: ProviderRequest, clientRoot: string, hostRoot: string): ProviderRequest {
-  const { model, ...fields } = request;
-  return { ...fields, cwd: translatePath(request.cwd, clientRoot, hostRoot), prompt_path: translatePath(request.prompt_path, clientRoot, hostRoot), transcript_path: translatePath(request.transcript_path, clientRoot, hostRoot), ...(model === undefined ? {} : { model }) };
+  const { model, effort, ...fields } = request;
+  return { ...fields, cwd: translatePath(request.cwd, clientRoot, hostRoot), prompt_path: translatePath(request.prompt_path, clientRoot, hostRoot), transcript_path: translatePath(request.transcript_path, clientRoot, hostRoot), ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
 }
 
 function safeJson(value: unknown): string { return JSON.stringify(value); }
@@ -904,8 +904,8 @@ export async function createSupervisorServer(options: RunnerSupervisorOptions): 
         record.action = 'run-role';
         const parsed = providerRequestSchema.parse(body);
         record.job_id = parsed.job_id; record.role = parsed.role; record.provider = parsed.provider;
-        const { model, ...requestFields } = parsed;
-        const request: ProviderRequest = { ...requestFields, ...(model === undefined ? {} : { model }) };
+        const { model, effort, ...requestFields } = parsed;
+        const request: ProviderRequest = { ...requestFields, ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
         const result = await options.runner.runRole(translateRequest(request, clientRoot, hostRoot), cancellation.signal);
         record.status = result.status; if (result.error_code) record.code = result.error_code;
         res.end(safeJson({ ...result, transcript_path: translatePath(result.transcript_path, hostRoot, clientRoot) })); return;

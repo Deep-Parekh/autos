@@ -146,6 +146,45 @@ When a provider hits its session or usage limit, the next provider in the role's
 
 Within one job, SWE containers reuse the same `/scratch`, so a fallback, repair round or resume does not recompile and repopulate `/scratch/m2` from zero. QA and the reviewer get their own empty scratch every time. The SWE scratch lives under `artifacts/.scratch/swe-<jobId>` and is deleted when the job ends, is cancelled or pruned, and when the supervisor starts.
 
+## Model tiers: cheapest model and effort first
+
+By default each role runs one provider/model chain. To save cost, define **model tiers** (size classes such as `sm`, `med`, `lg`; the names are yours) and give a role a **ladder** of tiers, cheapest first. Autos starts each ticket as low as it can and moves up only when the work fails, so a renamed field or a syntax bug never uses Opus or GPT-6 Sol. The sample configs carry a commented example; the `provider`/`model`/`fallbacks` form keeps working, and you can mix forms per role.
+
+```yaml
+models:                         # optional reusable named models, written in tiers as name or name:effort
+  luna:  {provider: codex, model: gpt-6-luna}
+  terra: {provider: codex, model: gpt-6-terra}
+model_tiers:                    # each tier: ordered list of 1-3 entries {provider, model, effort}
+  sm:  [{provider: claude, model: haiku, effort: high}, luna:high]
+  med: [terra:high, {provider: claude, model: sonnet, effort: high}, {provider: cursor, model: auto}]
+  lg:  [{provider: codex, model: gpt-6-sol, effort: xhigh}, {provider: claude, model: opus, effort: max}]
+triage: {enabled: true, tier: sm, timeout_ms: 180000}
+agents:
+  swe:      {timeout_ms: 1800000, ladder: [sm, med, lg]}
+  qa:       {timeout_ms: 900000,  ladder: [med, lg]}
+  reviewer: {timeout_ms: 900000,  ladder: [med, lg], min: med}
+```
+
+- **Effort is part of an entry, not of the model**, so the same model can appear at `high` in one tier and `xhigh` in another (e.g. `sm: [luna:medium]`, `sm-x: [luna:xhigh]`). Omit it for the CLI's default. Config load validates it per provider: Claude `--effort` accepts `low|medium|high|xhigh|max`; Codex (`-c model_reasoning_effort=…`) accepts `none|minimal|low|medium|high|xhigh|max`, and which levels a given model honours is up to the model (an unsupported one fails at the provider); Cursor entries use model `auto` and no effort. Model and effort go to the CLI as separate arguments.
+- **Within a tier**, entries are tried in order whenever one fails on the provider side: `RATE_LIMIT`, `AUTH`, `UPSTREAM`, `UNAVAILABLE`, `TIMEOUT`, and also `CONTEXT`/`INVALID_OUTPUT` (another model of the same size may cope). This replaces the role's `fallbacks` chain. The SWE handoff, the per-job SWE scratch and the rules for edits by a failed entry are the same as for fallbacks. When every entry of the current tier is rate limited, the job pauses as described above and resumes on the same tier. The new-ticket gate considers the SWE start tier (its floor, else its lowest tier): it engages when every entry's provider there is limited.
+- **Escalation to the next tier** happens when the work fails: checks, QA or review fail, so the repair SWE run uses the next tier. It also happens when a tier's last entry fails with `CONTEXT` or `INVALID_OUTPUT` (the whole tier was too small), for any role; SWE then continues partial work with a handoff after `CONTEXT`. QA and the reviewer otherwise stay at their start tier: a FAIL verdict is their job, not a sign they were too weak. Escalation rounds do not consume `jobs.max_repair_rounds`; they are bounded by the ladder (at most 8 tiers). Once SWE is at its top tier, `max_repair_rounds` applies as before and the job blocks when it is used up. `READY_FOR_HUMAN` still needs passing checks, QA and review on the same final candidate.
+- **Floor.** `min` must be one of the role's ladder tiers. Triage, pins and revisions never start the role below it, and a pin below it is refused. Use it to keep the reviewer on a strong tier.
+- **Start tier.** Sources in order of precedence:
+  1. A pin for this revision (`autos revise … --tier`).
+  2. A ticket pin (`autos tier KEY …` or `autos note KEY … --tier`).
+  3. The tier that finished the previous attempt. Revisions and retries never start below it.
+  4. The triage choice.
+  5. Otherwise the lowest tier (or the floor).
+- **Triage** is one cheap read-only call per new ticket. It runs on the `triage.tier` entries in order, in the QA sandbox profile, so it cannot write source. It reads the ticket and picks a starting tier, with a one-line reason, for each ladder role that has no pin or previous tier. Its JSON is validated, and trusted code clamps the choice to the ladder and floor. Any failure (malformed output, every entry limited, timeout) starts at the lowest tier. Without a `triage` block, or with `enabled: false`, roles start at their lowest tier. Triage is advisory: it only decides where to start.
+- **Pins** are stored by issue key like ticket notes, so you can set them before Autos has seen a ticket. They are applied when an attempt is picked up and survive restarts. `--effort` overrides the effort of every claude/codex entry of the pinned tier (the level must be valid for each; cursor entries run without), replacing that ladder tier in place so escalation continues to the next tier. A tier the role's ladder does not use is a fixed step without escalation, refused for a role with a floor. Roles in the plain provider form can be pinned to any tier (fixed). `autos notes` and `autos show` list pins; see [cli.md](cli.md).
+
+Evidence:
+- Each provider call's `call.json` records the tier, entry index (`chain_index`), model and effort; the triage call is marked `purpose: triage`.
+- `role_started`/`role_finished` events carry `tier`, `model` and `effort`, and `tier_selected`/`tier_escalated` events show the start tier and every move.
+- `tiers.json` holds each role's ladder, start tier and its source with the reason, the escalations and the triage outcome.
+- `summary.md` shows the tier and entry that solved the ticket.
+- `autos export dataset` includes `tiers` and the call fields, so you can later check which tickets a cheaper tier would have solved.
+
 ## Scaling to several tickets on a larger host
 
 The pilot processes one ticket at a time (`jobs.max_parallel: 1`). On a larger machine, raise it in `config/config.yaml` and restart the controller; no code change is needed:

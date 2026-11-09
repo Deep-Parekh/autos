@@ -76,6 +76,7 @@ async function main() {
     provider: args.provider,
     role: args.role,
     ...(args.model ? { model: args.model } : {}),
+    ...(args.effort ? { effort: args.effort } : {}),
     cwd: '/workspace',
     prompt_path: args.prompt,
     transcript_path: args.transcript,

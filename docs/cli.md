@@ -10,9 +10,13 @@ autos doctor [--deep] [--config PATH]
 autos providers [--json] [--config PATH]
 autos providers test --all [--config PATH]
 autos run ISSUE-123 [--dry-run] [--note TEXT]... [--config PATH]
-autos revise JOB_ID|ISSUE-123 --note TEXT [--note-file PATH] [--roles swe,qa,reviewer] [--wait] [--url URL] [--config PATH]
+autos revise JOB_ID|ISSUE-123 --note TEXT [--note-file PATH] [--roles swe,qa,reviewer] [--tier TIER[:EFFORT]] [--effort LEVEL] [--wait] [--url URL] [--config PATH]
 autos close ISSUE-123 --merged|--abandoned [--note TEXT] [--dry-run] [--yes] [--url URL] [--json] [--config PATH]
 autos show ISSUE-123 [--url URL] [--json] [--config PATH]
+autos note ISSUE-123 [--swe|--qa|--reviewer|--all|--note TEXT]... [--hold] [--tier TIER[:EFFORT] [--effort LEVEL]] [--url URL] [--json] [--config PATH]
+autos notes [ISSUE-123] [--url URL] [--json] [--config PATH]
+autos tier ISSUE-123 TIER[:EFFORT] [--effort LEVEL] [--role swe|qa|reviewer] [--url URL] [--json] [--config PATH]
+autos tier ISSUE-123 [--clear [--role swe|qa|reviewer]] [--url URL] [--json] [--config PATH]
 autos workspaces [--sizes] [--url URL] [--json] [--config PATH]
 autos workspaces prune [--dry-run] [--older-than HOURS] [--sizes] [--url URL] [--json] [--config PATH]
 autos retry JOB_ID [--config PATH]
@@ -76,7 +80,7 @@ Exit code is non-zero when any check is FAIL or the base checks fail. Text mode 
 
 ## Logging
 
-`controller start` writes structured JSON log lines to stderr: one line per request (`request_id`, `method`, route pattern, `status`, `duration_ms`), `auth_rejected` for a rejected token (the presented token is never logged), and `audit` lines for job submit, revise, cancel, retry, issue close and workspace prune (ids, counts and resolution only) with job id, issue key and the actor label (`X-Autos-Operator`, default `operator`). Headers, bodies, tokens, query strings and operator note text are never logged. See [api-publishing.md](api-publishing.md).
+`controller start` writes structured JSON log lines to stderr: one line per request (`request_id`, `method`, route pattern, `status`, `duration_ms`), `auth_rejected` for a rejected token (the presented token is never logged), and `audit` lines for job submit, revise, cancel, retry, issue close, workspace prune and tier pin set/clear (ids, counts, resolution, role, tier and effort only) with job id, issue key and the actor label (`X-Autos-Operator`, default `operator`). Headers, bodies, tokens, query strings and operator note text are never logged. See [api-publishing.md](api-publishing.md).
 
 ## Provider fallbacks
 
@@ -140,7 +144,9 @@ autos revise JOB_ID --note "Also handle the empty-list case" [--note-file notes.
 
 `autos run ISSUE-123 --note TEXT` (repeatable, at most 5) attaches operator notes to an initial local attempt in the same way.
 
-`autos revise` also accepts an issue key: `autos revise SAMPLE-123 --note "..."` revises the issue's latest `READY_FOR_HUMAN` attempt through `POST /v1/issues/{issueKey}/revisions` (404 when the issue has none, 409 when it is closed or an attempt is active). Everything else (`--note`, `--note-file`, `--roles`, `--wait`) behaves exactly as for a job id.
+`autos revise` also accepts an issue key: `autos revise SAMPLE-123 --note "..."` revises the issue's latest `READY_FOR_HUMAN` attempt through `POST /v1/issues/{issueKey}/revisions` (404 when the issue has none, 409 when it is closed or an attempt is active). Everything else (`--note`, `--note-file`, `--roles`, `--tier`, `--effort`, `--wait`) behaves exactly as for a job id.
+
+Model tier of a revision. With a laddered SWE role (see [model tiers](local-pilot.md#model-tiers-cheapest-model-and-effort-first)), a revision starts SWE at the step that finished the previous attempt, never below it. `--tier TIER` (optionally `--effort LEVEL` or `TIER:LEVEL`, an effort override for the tier's Claude/Codex entries) sets the SWE starting tier for this revision only, with the same rules as a ticket pin (see "Model tier pins"); it wins over a ticket pin but never goes below the role's floor. The controller refuses an unknown tier, an effort a Claude/Codex entry of the tier does not accept, or a tier below the floor with exit 2 and the reason. `--effort` without `--tier` is rejected.
 
 ## Ticket notes
 
@@ -162,19 +168,42 @@ Targeting. Every flag below creates one separate note and is repeatable (at most
 
 Hold and release. `--hold` stops automatic discovery from queueing the issue until `--release`; it can be combined with new notes or used alone, and works for issues Autos has not seen. An explicit `autos run KEY` still works. A held issue also shows as `held` in `autos notes`.
 
-Managing. `autos note KEY --list` shows the issue's notes in full, `--remove NOTE_ID` removes one, `--clear` removes all of them, `--release` lifts the hold. `--list`, `--remove`, `--clear` and `--release` cannot be combined with each other or with adding notes (only `--hold` may accompany new notes). All of them need the running controller (`--url` overrides the address).
+Tier. `--tier TIER[:EFFORT]` (optionally with `--effort LEVEL`) also pins the SWE starting tier, exactly like `autos tier KEY TIER` (see "Model tier pins" below); it can accompany new notes or `--hold`, or be used alone.
 
-Seeing everything. `autos notes` prints every issue that has notes or a hold:
+Managing. `autos note KEY --list` shows the issue's notes in full, `--remove NOTE_ID` removes one, `--clear` removes all of them, `--release` lifts the hold. `--list`, `--remove`, `--clear` and `--release` cannot be combined with each other or with adding notes (only `--hold` and `--tier` may accompany new notes). All of them need the running controller (`--url` overrides the address).
+
+Seeing everything. `autos notes` prints every issue that has notes, a hold or tier pins:
 
 ```text
-KEY       NOTES                     HELD  STATUS           ATTEMPTS  LATEST                    CURRENT NOTES USED
-NEW-9     3 (swe:2 qa:1)            yes   held             0         -                         n/a
-XYZ-120   1 (swe:1 qa:1 reviewer:1) no    awaiting review  2 (+1 dry) READY_FOR_HUMAN 2h05m ago yes
+KEY       NOTES                     HELD  TIER                STATUS           ATTEMPTS    LATEST                     CURRENT NOTES USED
+NEW-9     3 (swe:2 qa:1)            yes   swe=med:xhigh       held             0           -                          n/a
+XYZ-120   1 (swe:1 qa:1 reviewer:1) no    -                   awaiting review  2 (+1 dry)  READY_FOR_HUMAN 2h05m ago  yes
 ```
 
-`NOTES` is the note count with how many notes target each role; `STATUS` is one of not seen, held, queued, in progress, planned, awaiting review, blocked, cancelled, merged, abandoned (from the latest non-dry-run attempt); `ATTEMPTS` counts non-dry-run attempts (dry runs in parentheses); `CURRENT NOTES USED` is `yes` when at least one attempt received every current note, `no` when attempts exist but none did (for example the notes were added after the last attempt: run, retry or revise it), and `n/a` when Autos has not seen the issue. `autos notes KEY` shows one issue in detail including the note texts, and `--json` prints the raw summaries. `autos show KEY` has a "Ticket notes" section with the same detail.
+`NOTES` is the note count with how many notes target each role; `TIER` lists the tier pins per role (`-` when none); `STATUS` is one of not seen, held, queued, in progress, planned, awaiting review, blocked, cancelled, merged, abandoned (from the latest non-dry-run attempt); `ATTEMPTS` counts non-dry-run attempts (dry runs in parentheses); `CURRENT NOTES USED` is `yes` when at least one attempt received every current note, `no` when attempts exist but none did (for example the notes were added after the last attempt: run, retry or revise it), and `n/a` when Autos has not seen the issue. `autos notes KEY` shows one issue in detail including the note texts and a `Tier pins` section, and `--json` prints the raw summaries (`tier_pins`). `autos show KEY` has a "Ticket notes" section with the same detail.
 
 Privacy. The note text is evidence: it is stored in the attempt's `operator-notes.json` artifact (marked as a ticket note) and is part of the dataset export (`operator_notes`). It is never put in events, logs, error messages or the audit trail (which records only issue key, note id, roles and the `X-Autos-Operator` actor label). Note text is returned only by the ticket notes endpoints, so treat the API token accordingly. See the ticket notes routes in [api-publishing.md](api-publishing.md).
+
+## Model tier pins
+
+With model tiers and per-role ladders configured (see [model tiers](local-pilot.md#model-tiers-cheapest-model-and-effort-first)), a tier pin chooses the tier a role starts at for one issue key. A tier is a named list of model entries (tried in order on provider-side failures); a ladder is a list of tier names.
+
+```sh
+autos tier XYZ-120 med                       # SWE starts at tier med
+autos tier XYZ-120 med --effort xhigh        # same tier, every Claude/Codex entry at xhigh
+autos tier XYZ-120 med:xhigh                 # shorthand for --effort xhigh
+autos tier XYZ-120 lg --role reviewer        # reviewer starts at lg
+autos note XYZ-120 --swe "Needs the 2.4 schema" --tier med
+autos tier XYZ-120                           # list the pins
+autos tier XYZ-120 --clear [--role swe]      # clear one role, or all
+```
+
+- A pin is stored by issue key like a ticket note: set it before or after Autos has seen the ticket. It is applied whenever a later attempt is picked up (new, retried or revised), survives controller restarts and stays until cleared. Attempts already picked up keep their step. `--role` defaults to `swe`; there is at most one pin per role.
+- Start step, highest priority first: `autos revise … --tier` (that revision only) > ticket pin > the step that finished the previous attempt (revisions and retries start there, never below it) > triage > the first ladder tier. Nothing starts below the role's floor (`min`); a pin below the floor is refused.
+- `--effort LEVEL` (or `TIER:LEVEL`; giving both is rejected) overrides the effort of every entry of the tier whose provider accepts one; Cursor entries run without one, and the level must be valid for each Claude and Codex entry. Without it, each entry keeps its configured effort.
+- A tier in the role's ladder starts at its position; with an effort override it replaces that ladder step in place, and escalation continues to the next tier. A tier not in the role's ladder is a fixed step with no escalation, and is refused for a role that has a floor. A role configured with plain `provider`/`model` (no ladder) can be pinned to any tier, as a fixed step.
+- Output: `Pinned swe of XYZ-120 to med:xhigh (in the ladder; escalation continues to the next tier)`, or `(fixed step: not in the role's ladder, no escalation)`; `--json` prints `{pin, step, in_ladder}`. An unknown tier, an invalid effort, a tier below the floor (or outside the ladder of a role with a floor) or a key outside `jira.allowed_projects` exits 2 with the controller's reason; a closed issue exits 1 (`CONFLICT`).
+- `autos notes` (`TIER` column), `autos notes KEY` and `autos show KEY` display the pins. The API is `GET`, `PUT` and `DELETE /v1/issues/{issueKey}/tier` (`DELETE ?role=ROLE` for one role); the audit trail records issue key, role, tier and effort.
 
 ## Finishing a ticket and workspace hygiene
 

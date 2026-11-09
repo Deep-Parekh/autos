@@ -182,12 +182,16 @@ function claudePermissionArgs(role: AgentRole, bashPrefixes: readonly string[]):
 function buildInvocation(provider: Provider, role: AgentRole, request: ProviderRequest, prompt: string, binaries: Partial<Record<Provider, string>>, bashPrefixes: readonly string[] = DEFAULT_SWE_BASH_PREFIXES): Invocation {
   const binary = binaries[provider] ?? defaults[provider];
   const modelArgs = provider === 'cursor' ? ['--model', CURSOR_MODEL] : request.model ? ['--model', request.model] : [];
+  // Reasoning effort is its own argv element (never interpolated into a shell): claude `--effort <level>` (claude --help);
+  // codex `-c model_reasoning_effort="<level>"` (a documented -c TOML override; the level is a validated enum, so quoting is fixed).
+  // Cursor has no effort control; the request schema refuses one for it.
+  const effortArgs = request.effort === undefined ? [] : provider === 'claude' ? ['--effort', request.effort] : provider === 'codex' ? ['-c', `model_reasoning_effort="${request.effort}"`] : [];
   const mayWrite = request.source_access === 'write' && role === 'swe';
   switch (provider) {
     case 'claude':
       // `claude -p` reads the prompt from stdin when no prompt argument is given (help: "[prompt]" optional,
       // --input-format text default), which avoids the per-argument argv size limit.
-      return { binary, args: ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', ...claudePermissionArgs(role, bashPrefixes), ...modelArgs], stdin: prompt };
+      return { binary, args: ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', ...claudePermissionArgs(role, bashPrefixes), ...modelArgs, ...effortArgs], stdin: prompt };
     case 'codex':
       // Approval policy "never" (codex exec has no -a flag; -c is documented) so a run can never block on a prompt.
       // Sandbox stays workspace-write (SWE) / read-only (others). Tradeoff: inside a container with all capabilities
@@ -195,7 +199,7 @@ function buildInvocation(provider: Provider, role: AgentRole, request: ProviderR
       // --dangerously-bypass-approvals-and-sandbox, is a blanket bypass forbidden by AGENTS.md, so it is not used.
       return {
         binary,
-        args: ['exec', '--json', '--ephemeral', '--cd', request.cwd, '--sandbox', mayWrite ? 'workspace-write' : 'read-only', '-c', 'approval_policy="never"', '--skip-git-repo-check', ...modelArgs, '-'],
+        args: ['exec', '--json', '--ephemeral', '--cd', request.cwd, '--sandbox', mayWrite ? 'workspace-write' : 'read-only', '-c', 'approval_policy="never"', '--skip-git-repo-check', ...modelArgs, ...effortArgs, '-'],
         stdin: prompt,
       };
     case 'cursor':
@@ -658,8 +662,8 @@ export class CliProviderAdapter implements ProviderAdapterPort {
 
   async run(untrustedRequest: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> {
     const parsedRequest = providerRequestSchema.parse(untrustedRequest);
-    const { model, ...requestBase } = parsedRequest;
-    const request: ProviderRequest = model === undefined ? requestBase : { ...requestBase, model };
+    const { model, effort, ...requestBase } = parsedRequest;
+    const request: ProviderRequest = { ...requestBase, ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
     if (request.provider !== this.provider) throw new AutosError('INVALID_INPUT', 'Provider request does not match adapter');
     if (request.provider === 'cursor') {
       if (request.model !== undefined && request.model !== CURSOR_MODEL) throw new AutosError('INVALID_INPUT', 'Cursor supports only model "auto"');

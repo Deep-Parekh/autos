@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { parse } from 'yaml';
-import { ERROR_CODES, JOB_EVENT_TYPES, jobEventSchema, jobRecordSchema } from '@autos/contracts';
+import { EFFORT_LEVELS, ERROR_CODES, JOB_EVENT_TYPES, jobEventSchema, jobRecordSchema, ticketNotesSummarySchema, tierPinRequestSchema, tierPinResultSchema, tierPinSchema } from '@autos/contracts';
 
 type Schema = { properties?: Record<string, Schema>; items?: Schema; enum?: unknown[]; $ref?: string; anyOf?: Schema[]; oneOf?: Schema[] };
 
@@ -45,4 +45,21 @@ test('every job record contract field is exposed by the job details API', async 
   const contractFields = Object.keys(jobRecordSchema.shape);
   assert.deepEqual(contractFields.filter((field) => !apiFields.includes(field)), [], 'contract job fields missing from the API schema');
   assert.deepEqual([...enumOf(job.properties!.blocked_code)].sort(), [...ERROR_CODES].sort());
+});
+
+test('every ticket notes summary and tier pin contract field is exposed by the notes API', async () => {
+  const doc = await openapi();
+  const summary = okJson(doc, '/v1/issues/{issueKey}/notes');
+  assert.deepEqual(Object.keys(summary.properties ?? {}).sort(), Object.keys(ticketNotesSummarySchema.shape).sort());
+  const pin = resolve(doc, summary.properties!.tier_pins!.items!);
+  assert.deepEqual(Object.keys(pin.properties ?? {}).sort(), Object.keys(tierPinSchema.shape).sort());
+  const pins = okJson(doc, '/v1/issues/{issueKey}/tier');
+  assert.deepEqual(Object.keys(resolve(doc, pins.properties!.pins!.items!).properties ?? {}).sort(), Object.keys(tierPinSchema.shape).sort());
+  const put = doc.paths['/v1/issues/{issueKey}/tier']?.put;
+  assert.ok(put, 'PUT /v1/issues/{issueKey}/tier is documented');
+  const result = resolve(doc, put.responses['200'].content['application/json'].schema);
+  assert.deepEqual(Object.keys(result.properties ?? {}).sort(), Object.keys(tierPinResultSchema.shape).sort());
+  const request = resolve(doc, put.requestBody.content['application/json'].schema);
+  assert.deepEqual(Object.keys(request.properties ?? {}).sort(), Object.keys(tierPinRequestSchema.shape).sort());
+  assert.deepEqual([...enumOf(request.properties!.effort)].sort(), [...EFFORT_LEVELS].sort());
 });

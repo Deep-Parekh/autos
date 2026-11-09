@@ -26,8 +26,8 @@ function setup(jiraExists?: (key: string) => Promise<boolean>) {
   const summary = (key: string): TicketNotesSummary => {
     const own = notes.get(key) ?? [];
     return key === 'SAMPLE-1'
-      ? { issue_key: key, notes: own, held: held.has(key), status: 'awaiting_review', attempts: 2, dry_runs: 1, latest_job_id: job.job_id, latest_state: 'READY_FOR_HUMAN', last_activity_at: '2026-11-07T09:55:00.000Z', attempts_with_current_notes: own.length ? 1 : 0 }
-      : { issue_key: key, notes: own, held: held.has(key), status: held.has(key) ? 'held' : 'not_seen', attempts: 0, dry_runs: 0, latest_job_id: null, latest_state: null, last_activity_at: null, attempts_with_current_notes: 0 };
+      ? { issue_key: key, notes: own, held: held.has(key), status: 'awaiting_review', attempts: 2, dry_runs: 1, latest_job_id: job.job_id, latest_state: 'READY_FOR_HUMAN', last_activity_at: '2026-11-07T09:55:00.000Z', attempts_with_current_notes: own.length ? 1 : 0, tier_pins: [] }
+      : { issue_key: key, notes: own, held: held.has(key), status: held.has(key) ? 'held' : 'not_seen', attempts: 0, dry_runs: 0, latest_job_id: null, latest_state: null, last_activity_at: null, attempts_with_current_notes: 0, tier_pins: [] };
   };
   const monitor = monitorPort([makeEvent(1)]);
   const workflow: WorkflowServicePort = {
@@ -278,18 +278,18 @@ test('autos note warns when Jira does not know the key, still keeps the note, an
 test('autos notes prints the table and --json; autos notes KEY shows note texts', async () => {
   await withCli(async ({ f, deps, out, configPath }) => {
     const run = (...args: string[]) => main(['--config', configPath, ...args], deps);
-    assert.equal(await run('notes'), 0); assert.equal(out.join('\n'), 'No issues with ticket notes or a hold.');
+    assert.equal(await run('notes'), 0); assert.equal(out.join('\n'), 'No issues with ticket notes, a hold or tier pins.');
     await run('note', 'NEW-9', '--swe', 'a', '--swe', 'b', '--qa', 'c', '--hold');
     await run('note', 'SAMPLE-1', '--all', 'for everyone');
     await run('note', 'ONLYHOLD-1', '--hold');
     out.length = 0;
     assert.equal(await run('notes'), 0);
     const lines = out.join('\n').split('\n');
-    assert.match(lines[0]!, /^KEY\s+NOTES\s+HELD\s+STATUS\s+ATTEMPTS\s+LATEST\s+CURRENT NOTES USED$/);
+    assert.match(lines[0]!, /^KEY\s+NOTES\s+HELD\s+TIER\s+STATUS\s+ATTEMPTS\s+LATEST\s+CURRENT NOTES USED$/);
     const row = (key: string) => lines.find((line) => line.startsWith(key))!;
-    assert.match(row('NEW-9'), /^NEW-9\s+3 \(swe:2 qa:1\)\s+yes\s+held\s+0\s+-\s+n\/a$/);
-    assert.match(row('SAMPLE-1'), /^SAMPLE-1\s+1 \(swe:1 qa:1 reviewer:1\)\s+no\s+awaiting review\s+2 \(\+1 dry\)\s+READY_FOR_HUMAN 2h05m ago\s+yes$/);
-    assert.match(row('ONLYHOLD-1'), /^ONLYHOLD-1\s+0\s+yes\s+held\s+0\s+-\s+n\/a$/);
+    assert.match(row('NEW-9'), /^NEW-9\s+3 \(swe:2 qa:1\)\s+yes\s+-\s+held\s+0\s+-\s+n\/a$/);
+    assert.match(row('SAMPLE-1'), /^SAMPLE-1\s+1 \(swe:1 qa:1 reviewer:1\)\s+no\s+-\s+awaiting review\s+2 \(\+1 dry\)\s+READY_FOR_HUMAN 2h05m ago\s+yes$/);
+    assert.match(row('ONLYHOLD-1'), /^ONLYHOLD-1\s+0\s+yes\s+-\s+held\s+0\s+-\s+n\/a$/);
     assert.doesNotMatch(out.join('\n'), /for everyone/);
     out.length = 0; assert.equal(await run('--json', 'notes'), 0);
     assert.deepEqual(JSON.parse(out.join('\n')).tickets.map((t: TicketNotesSummary) => t.issue_key), ['NEW-9', 'ONLYHOLD-1', 'SAMPLE-1']);
@@ -301,7 +301,7 @@ test('autos notes prints the table and --json; autos notes KEY shows note texts'
     assert.equal(f.calls.filter((c) => c.kind === 'add').length, 4);
   });
   // "no" when attempts exist but none used the current notes
-  const entry: TicketNotesSummary = { issue_key: 'ABC-1', notes: [{ note_id: randomUUID(), issue_key: 'ABC-1', instructions: 'x', roles: ['swe'], author: 'operator', created_at: now }], held: false, status: 'blocked', attempts: 1, dry_runs: 0, latest_job_id: job.job_id, latest_state: 'BLOCKED', last_activity_at: now, attempts_with_current_notes: 0 };
+  const entry: TicketNotesSummary = { issue_key: 'ABC-1', notes: [{ note_id: randomUUID(), issue_key: 'ABC-1', instructions: 'x', roles: ['swe'], author: 'operator', created_at: now }], held: false, status: 'blocked', attempts: 1, dry_runs: 0, latest_job_id: job.job_id, latest_state: 'BLOCKED', last_activity_at: now, attempts_with_current_notes: 0, tier_pins: [] };
   assert.match(formatTicketNotesTable([entry], Date.parse(now) + 90_000)[1]!, /blocked\s+1\s+BLOCKED 1m00s ago\s+no$/);
 });
 

@@ -105,6 +105,29 @@ const iso = (ms: number) => new Date(ms).toISOString();
 const roles = (w: World, role: string) => w.requests.filter((r) => r.role === role).map((r) => r.provider);
 
 describe('rate-limit pause and resume', () => {
+  it('a ladder tier whose entries are all limited pauses (no escalation), gates new tickets and resumes on the same tier', async () => {
+    const med = [{ provider: 'codex' as const, model: 'gpt-6-terra', tier: 'med', effort: 'high' as const }, { provider: 'claude' as const, model: 'sonnet', tier: 'med', effort: 'high' as const }];
+    const lg = [{ provider: 'claude' as const, model: 'opus', tier: 'lg', effort: 'max' as const }];
+    config.model_tiers = { med, lg };
+    config.agents.swe = { provider: 'codex', model: 'gpt-6-terra', timeout_ms: 600_000, fallbacks: [{ provider: 'claude', model: 'sonnet' }], ladder: [{ label: 'med', tier: 'med', chain: med }, { label: 'lg', tier: 'lg', chain: lg }] };
+    const w = world(); failWith(w, 'codex:swe', { code: 'RATE_LIMIT', times: 3 }); failWith(w, 'claude:swe', { code: 'RATE_LIMIT', times: 3 });
+    const { store, service } = open(w);
+    const paused = await service.execute((await service.submit('SAMPLE-1', false)).job_id);
+    assert.equal(paused.state, 'PAUSED'); assert.equal(paused.paused_role, 'swe');
+    const limits = await service.activity();
+    assert.deepEqual(limits.provider_limits.providers.map((p) => p.provider).sort(), ['claude', 'codex']);
+    assert.equal(limits.provider_limits.gate_active, true, 'every entry of the SWE start tier is limited');
+    const tiersAtPause = JSON.parse(await readFile(join(config.storage.artifacts_dir, paused.job_id, 'tiers.json'), 'utf8'));
+    assert.equal(tiersAtPause.roles.swe.current, 'med'); assert.deepEqual(tiersAtPause.roles.swe.escalations, [], 'a limit never escalates');
+    w.now = T0 + minutes(15); await service.drain();
+    const done = (await service.get(paused.job_id))!;
+    assert.equal(done.state, 'READY_FOR_HUMAN', JSON.stringify(done));
+    const rounds = JSON.parse(await readFile(join(config.storage.artifacts_dir, paused.job_id, 'rounds.json'), 'utf8'));
+    const swe = rounds.rounds.flatMap((r: any) => r.provider_attempts).filter((a: any) => a.role === 'swe');
+    assert.deepEqual(swe.map((a: any) => [a.provider, a.tier, a.effort, a.error_code]), [['codex', 'med', 'high', 'RATE_LIMIT'], ['claude', 'med', 'high', 'RATE_LIMIT'], ['codex', 'med', 'high', null]]);
+    store.close();
+  });
+
   it('pauses a QA chain that is fully rate limited, releases the slot, and resumes on the same candidate after the backoff', async () => {
     const w = world(); failWith(w, 'codex:qa', { code: 'RATE_LIMIT', times: 3 }); failWith(w, 'claude:qa', { code: 'RATE_LIMIT', times: 3 });
     const { store, service } = open(w);

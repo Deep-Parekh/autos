@@ -2055,7 +2055,7 @@ paths:
       summary: Request changes on a READY_FOR_HUMAN job
       tags:
         - operator
-      description: Queues a revision that continues from the reviewed commit on the same feature branch, with operator notes delivered to the selected roles (default SWE). Only the latest READY_FOR_HUMAN attempt of an issue with no active attempt can be revised (409 otherwise). The optional `X-Autos-Operator` header labels the note author; it is a label, not authentication. Notes are stored as evidence and never appear in responses, events, or logs.
+      description: "Queues a revision that continues from the reviewed commit on the same feature branch, with operator notes delivered to the selected roles (default SWE). Only the latest READY_FOR_HUMAN attempt of an issue with no active attempt can be revised (409 otherwise). The optional `X-Autos-Operator` header labels the note author; it is a label, not authentication. Notes are stored as evidence and never appear in responses, events, or logs. Optional `tier` (with an optional `effort` override for its entries) sets the SWE starting tier for this revision only: it wins over the ticket pin and over the step that finished the previous attempt, but never goes below the role's ladder floor (`min`); 400 with the reason for an unknown tier, an effort a Claude/Codex entry of the tier does not accept, or a tier below the floor."
       requestBody:
         required: true
         content:
@@ -2081,13 +2081,29 @@ paths:
                       - qa
                       - reviewer
                   description: Roles that receive the note; defaults to ["swe"].
+                tier:
+                  type: string
+                  pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                  description: Optional SWE starting tier (a `model_tiers` name) for this revision only (wins over the ticket pin and the previous attempt's finishing step; never below the role's floor).
+                effort:
+                  type: string
+                  enum:
+                    - none
+                    - minimal
+                    - low
+                    - medium
+                    - high
+                    - xhigh
+                    - max
+                  description: Optional effort override for the entries of `tier`; only valid together with `tier` (400 otherwise).
               required:
                 - instructions
             example:
               instructions: Also handle the empty-list case.
               roles:
                 - swe
-                - qa
+              tier: med
+              effort: xhigh
       parameters:
         - schema:
             type: string
@@ -2461,7 +2477,7 @@ paths:
       summary: Request changes on an issue's latest READY_FOR_HUMAN attempt
       tags:
         - operator
-      description: Queues a revision that continues from the latest READY_FOR_HUMAN attempt of the issue (same feature branch and pinned base), with operator notes delivered to the selected roles (default SWE). 404 when the issue has no READY_FOR_HUMAN attempt; 409 when the issue is closed, another attempt is active, or the READY_FOR_HUMAN attempt is not revisable. The optional `X-Autos-Operator` header labels the note author; it is a label, not authentication. Notes are stored as evidence and never appear in responses, events, or logs.
+      description: "Queues a revision that continues from the latest READY_FOR_HUMAN attempt of the issue (same feature branch and pinned base), with operator notes delivered to the selected roles (default SWE). 404 when the issue has no READY_FOR_HUMAN attempt; 409 when the issue is closed, another attempt is active, or the READY_FOR_HUMAN attempt is not revisable. The optional `X-Autos-Operator` header labels the note author; it is a label, not authentication. Notes are stored as evidence and never appear in responses, events, or logs. Optional `tier` (with an optional `effort` override for its entries) sets the SWE starting tier for this revision only: it wins over the ticket pin and over the step that finished the previous attempt, but never goes below the role's ladder floor (`min`); 400 with the reason for an unknown tier, an effort a Claude/Codex entry of the tier does not accept, or a tier below the floor."
       requestBody:
         required: true
         content:
@@ -2487,13 +2503,29 @@ paths:
                       - qa
                       - reviewer
                   description: Roles that receive the note; defaults to ["swe"].
+                tier:
+                  type: string
+                  pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                  description: Optional SWE starting tier (a `model_tiers` name) for this revision only (wins over the ticket pin and the previous attempt's finishing step; never below the role's floor).
+                effort:
+                  type: string
+                  enum:
+                    - none
+                    - minimal
+                    - low
+                    - medium
+                    - high
+                    - xhigh
+                    - max
+                  description: Optional effort override for the entries of `tier`; only valid together with `tier` (400 otherwise).
               required:
                 - instructions
             example:
               instructions: Also handle the empty-list case.
               roles:
                 - swe
-                - qa
+              tier: med
+              effort: xhigh
       parameters:
         - schema:
             type: string
@@ -3292,7 +3324,7 @@ paths:
       summary: Get an issue's closure, attempts and ticket notes
       tags:
         - operator
-      description: Returns the closure record (null while the issue is open), the issue's most recent attempts, newest first, and its ticket notes with the hold and progress summary. 404 when Autos knows nothing about the issue (no attempts, closure, ticket notes or hold).
+      description: Returns the closure record (null while the issue is open), the issue's most recent attempts, newest first, and its ticket notes with the hold and progress summary. 404 when Autos knows nothing about the issue (no attempts, closure, ticket notes, hold or tier pins).
       parameters:
         - schema:
             type: string
@@ -3633,6 +3665,62 @@ paths:
                         type: integer
                         minimum: 0
                         description: Attempts (any mode) that received every current ticket note.
+                      tier_pins:
+                        type: array
+                        maxItems: 3
+                        items:
+                          type: object
+                          additionalProperties: false
+                          description: "An operator model-tier pin: the starting tier of one role for every later attempt of the issue, until cleared."
+                          properties:
+                            issue_key:
+                              type: string
+                              pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                            role:
+                              type: string
+                              enum:
+                                - swe
+                                - qa
+                                - reviewer
+                            tier:
+                              type: string
+                              pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                              description: A tier name from model_tiers.
+                            effort:
+                              type:
+                                - string
+                                - "null"
+                              enum:
+                                - none
+                                - minimal
+                                - low
+                                - medium
+                                - high
+                                - xhigh
+                                - max
+                                - null
+                              description: "Effort override for every entry of the tier whose provider accepts one; null: each entry keeps its configured effort."
+                            author:
+                              type: string
+                              pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+                            created_at:
+                              type: string
+                              format: date-time
+                          required:
+                            - issue_key
+                            - role
+                            - tier
+                            - effort
+                            - author
+                            - created_at
+                          examples:
+                            - issue_key: SAMPLE-123
+                              role: swe
+                              tier: med
+                              effort: xhigh
+                              author: operator
+                              created_at: 2026-11-07T12:00:00.000Z
+                        description: Operator model-tier pins (at most one per role), applied when each later attempt is picked up until cleared.
                     required:
                       - issue_key
                       - notes
@@ -3644,6 +3732,7 @@ paths:
                       - latest_state
                       - last_activity_at
                       - attempts_with_current_notes
+                      - tier_pins
                     examples:
                       - issue_key: SAMPLE-123
                         notes: []
@@ -3655,6 +3744,7 @@ paths:
                         latest_state: null
                         last_activity_at: null
                         attempts_with_current_notes: 0
+                        tier_pins: []
                 required:
                   - issue_key
                   - closure
@@ -3675,6 +3765,7 @@ paths:
                   latest_state: null
                   last_activity_at: null
                   attempts_with_current_notes: 0
+                  tier_pins: []
         "400":
           description: Default Response
           content:
@@ -4385,7 +4476,7 @@ paths:
       summary: Get one issue's ticket notes and progress
       tags:
         - operator
-      description: Always returns a summary, even for an issue with no notes, no hold and no attempts (status not_seen).
+      description: Always returns a summary, even for an issue with no notes, no hold, no tier pins and no attempts (status not_seen).
       parameters:
         - schema:
             type: string
@@ -4397,13 +4488,13 @@ paths:
         - bearerAuth: []
       responses:
         "200":
-          description: An issue with ticket notes or a hold, and whether Autos has worked on it.
+          description: An issue with ticket notes, a hold or tier pins, and whether Autos has worked on it.
           content:
             application/json:
               schema:
                 type: object
                 additionalProperties: false
-                description: An issue with ticket notes or a hold, and whether Autos has worked on it.
+                description: An issue with ticket notes, a hold or tier pins, and whether Autos has worked on it.
                 properties:
                   issue_key:
                     type: string
@@ -4512,6 +4603,62 @@ paths:
                     type: integer
                     minimum: 0
                     description: Attempts (any mode) that received every current ticket note.
+                  tier_pins:
+                    type: array
+                    maxItems: 3
+                    items:
+                      type: object
+                      additionalProperties: false
+                      description: "An operator model-tier pin: the starting tier of one role for every later attempt of the issue, until cleared."
+                      properties:
+                        issue_key:
+                          type: string
+                          pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                        role:
+                          type: string
+                          enum:
+                            - swe
+                            - qa
+                            - reviewer
+                        tier:
+                          type: string
+                          pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                          description: A tier name from model_tiers.
+                        effort:
+                          type:
+                            - string
+                            - "null"
+                          enum:
+                            - none
+                            - minimal
+                            - low
+                            - medium
+                            - high
+                            - xhigh
+                            - max
+                            - null
+                          description: "Effort override for every entry of the tier whose provider accepts one; null: each entry keeps its configured effort."
+                        author:
+                          type: string
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+                        created_at:
+                          type: string
+                          format: date-time
+                      required:
+                        - issue_key
+                        - role
+                        - tier
+                        - effort
+                        - author
+                        - created_at
+                      examples:
+                        - issue_key: SAMPLE-123
+                          role: swe
+                          tier: med
+                          effort: xhigh
+                          author: operator
+                          created_at: 2026-11-07T12:00:00.000Z
+                    description: Operator model-tier pins (at most one per role), applied when each later attempt is picked up until cleared.
                 required:
                   - issue_key
                   - notes
@@ -4523,6 +4670,7 @@ paths:
                   - latest_state
                   - last_activity_at
                   - attempts_with_current_notes
+                  - tier_pins
               example:
                 issue_key: SAMPLE-123
                 notes: []
@@ -4534,6 +4682,7 @@ paths:
                 latest_state: null
                 last_activity_at: null
                 attempts_with_current_notes: 0
+                tier_pins: []
         "400":
           description: Default Response
           content:
@@ -5390,13 +5539,837 @@ paths:
                 code: NOT_FOUND
                 message: Resource not found
                 request_id: 00000000-0000-4000-8000-000000000002
+  /v1/issues/{issueKey}/tier:
+    get:
+      operationId: getTierPins
+      summary: List an issue's model-tier pins
+      tags:
+        - operator
+      description: "A tier pin chooses a role's starting tier (a `model_tiers` name, optionally with an effort override) for an issue key. It can be stored before or after Autos has seen the issue, survives restarts and applies whenever a later attempt is picked up, until cleared. Precedence: a revision's own `tier` > this pin > the step that finished the previous attempt (revisions and retries) > triage > the first ladder tier; never below the role's floor (`min`). `effort` overrides the effort of every entry of the tier whose provider accepts one (Cursor entries run without one) and must be valid for each Claude/Codex entry. A tier in the role's ladder starts at its position (with an effort override it replaces that ladder step in place) and escalation continues to the next tier. A tier not in the ladder is a fixed step with no escalation, refused for a role with a floor; roles without a ladder can be pinned to any tier (fixed step). Returns an empty list when the issue has no pins."
+      parameters:
+        - schema:
+            type: string
+            pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+          in: path
+          name: issueKey
+          required: true
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  pins:
+                    type: array
+                    maxItems: 3
+                    items:
+                      type: object
+                      additionalProperties: false
+                      description: "An operator model-tier pin: the starting tier of one role for every later attempt of the issue, until cleared."
+                      properties:
+                        issue_key:
+                          type: string
+                          pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                        role:
+                          type: string
+                          enum:
+                            - swe
+                            - qa
+                            - reviewer
+                        tier:
+                          type: string
+                          pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                          description: A tier name from model_tiers.
+                        effort:
+                          type:
+                            - string
+                            - "null"
+                          enum:
+                            - none
+                            - minimal
+                            - low
+                            - medium
+                            - high
+                            - xhigh
+                            - max
+                            - null
+                          description: "Effort override for every entry of the tier whose provider accepts one; null: each entry keeps its configured effort."
+                        author:
+                          type: string
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+                        created_at:
+                          type: string
+                          format: date-time
+                      required:
+                        - issue_key
+                        - role
+                        - tier
+                        - effort
+                        - author
+                        - created_at
+                      examples:
+                        - issue_key: SAMPLE-123
+                          role: swe
+                          tier: med
+                          effort: xhigh
+                          author: operator
+                          created_at: 2026-11-07T12:00:00.000Z
+                required:
+                  - pins
+              example:
+                pins: []
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+    put:
+      operationId: setTierPin
+      summary: Pin a role's starting model tier for an issue
+      tags:
+        - operator
+      description: "A tier pin chooses a role's starting tier (a `model_tiers` name, optionally with an effort override) for an issue key. It can be stored before or after Autos has seen the issue, survives restarts and applies whenever a later attempt is picked up, until cleared. Precedence: a revision's own `tier` > this pin > the step that finished the previous attempt (revisions and retries) > triage > the first ladder tier; never below the role's floor (`min`). `effort` overrides the effort of every entry of the tier whose provider accepts one (Cursor entries run without one) and must be valid for each Claude/Codex entry. A tier in the role's ladder starts at its position (with an effort override it replaces that ladder step in place) and escalation continues to the next tier. A tier not in the ladder is a fixed step with no escalation, refused for a role with a floor; roles without a ladder can be pinned to any tier (fixed step). Replaces the role's previous pin. 400 with the reason for an unknown tier, an effort a Claude/Codex entry of the tier does not accept, a tier below the role's floor or outside the ladder of a role with a floor, or a project outside jira.allowed_projects; 409 when the issue is closed. The optional `X-Autos-Operator` header labels the author; it is a label, not authentication."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                role:
+                  type: string
+                  enum:
+                    - swe
+                    - qa
+                    - reviewer
+                  default: swe
+                  description: Role whose starting step is pinned; defaults to swe.
+                tier:
+                  type: string
+                  pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                  description: A tier name from model_tiers.
+                effort:
+                  type: string
+                  enum:
+                    - none
+                    - minimal
+                    - low
+                    - medium
+                    - high
+                    - xhigh
+                    - max
+                  description: "Optional effort override applied to every entry of the tier whose provider accepts efforts (Cursor entries run without one); must be valid for each Claude/Codex entry. Omitted: each entry keeps its configured effort."
+              required:
+                - tier
+            example:
+              role: swe
+              tier: med
+              effort: xhigh
+      parameters:
+        - schema:
+            type: string
+            pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+          in: path
+          name: issueKey
+          required: true
+        - schema:
+            type: string
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+          in: header
+          name: x-autos-operator
+          required: false
+          description: Optional audit label (not authentication). Defaults to operator.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  pin:
+                    type: object
+                    additionalProperties: false
+                    description: "An operator model-tier pin: the starting tier of one role for every later attempt of the issue, until cleared."
+                    properties:
+                      issue_key:
+                        type: string
+                        pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                      role:
+                        type: string
+                        enum:
+                          - swe
+                          - qa
+                          - reviewer
+                      tier:
+                        type: string
+                        pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                        description: A tier name from model_tiers.
+                      effort:
+                        type:
+                          - string
+                          - "null"
+                        enum:
+                          - none
+                          - minimal
+                          - low
+                          - medium
+                          - high
+                          - xhigh
+                          - max
+                          - null
+                        description: "Effort override for every entry of the tier whose provider accepts one; null: each entry keeps its configured effort."
+                      author:
+                        type: string
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+                      created_at:
+                        type: string
+                        format: date-time
+                    required:
+                      - issue_key
+                      - role
+                      - tier
+                      - effort
+                      - author
+                      - created_at
+                    examples:
+                      - issue_key: SAMPLE-123
+                        role: swe
+                        tier: med
+                        effort: xhigh
+                        author: operator
+                        created_at: 2026-11-07T12:00:00.000Z
+                  step:
+                    type: string
+                    maxLength: 60
+                    description: "The starting step: `tier`, or `tier:effort` with an effort override."
+                  in_ladder:
+                    type: boolean
+                    description: True when the tier is in the role's ladder (the role starts at its position and escalation continues to the next tier); false for a fixed step with no escalation (a tier outside the ladder, or a role without a ladder).
+                required:
+                  - pin
+                  - step
+                  - in_ladder
+              example:
+                pin:
+                  issue_key: SAMPLE-123
+                  role: swe
+                  tier: med
+                  effort: xhigh
+                  author: operator
+                  created_at: 2026-11-07T12:00:00.000Z
+                step: med:xhigh
+                in_ladder: true
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+    delete:
+      operationId: clearTierPins
+      summary: Clear an issue's model-tier pins
+      tags:
+        - operator
+      description: Removes the pin of one role (`role`) or of every role; later attempts start from the usual step again (attempts already picked up keep their step).
+      parameters:
+        - schema:
+            type: string
+            enum:
+              - swe
+              - qa
+              - reviewer
+          in: query
+          name: role
+          required: false
+        - schema:
+            type: string
+            pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+          in: path
+          name: issueKey
+          required: true
+        - schema:
+            type: string
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+          in: header
+          name: x-autos-operator
+          required: false
+          description: Optional audit label (not authentication). Defaults to operator.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  removed:
+                    type: integer
+                    minimum: 0
+                required:
+                  - removed
+              example:
+                removed: 1
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
   /v1/notes:
     get:
       operationId: listTicketNotes
-      summary: List issues with ticket notes or a hold
+      summary: List issues with ticket notes, a hold or tier pins
       tags:
         - operator
-      description: Every issue that has ticket notes or is held, with whether Autos has worked on it (status, attempts, latest state, whether the latest attempts used the current notes).
+      description: Every issue that has ticket notes, is held or has tier pins, with whether Autos has worked on it (status, attempts, latest state, whether the latest attempts used the current notes).
       security:
         - bearerAuth: []
       responses:
@@ -5413,7 +6386,7 @@ paths:
                     items:
                       type: object
                       additionalProperties: false
-                      description: An issue with ticket notes or a hold, and whether Autos has worked on it.
+                      description: An issue with ticket notes, a hold or tier pins, and whether Autos has worked on it.
                       properties:
                         issue_key:
                           type: string
@@ -5522,6 +6495,62 @@ paths:
                           type: integer
                           minimum: 0
                           description: Attempts (any mode) that received every current ticket note.
+                        tier_pins:
+                          type: array
+                          maxItems: 3
+                          items:
+                            type: object
+                            additionalProperties: false
+                            description: "An operator model-tier pin: the starting tier of one role for every later attempt of the issue, until cleared."
+                            properties:
+                              issue_key:
+                                type: string
+                                pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                              role:
+                                type: string
+                                enum:
+                                  - swe
+                                  - qa
+                                  - reviewer
+                              tier:
+                                type: string
+                                pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                                description: A tier name from model_tiers.
+                              effort:
+                                type:
+                                  - string
+                                  - "null"
+                                enum:
+                                  - none
+                                  - minimal
+                                  - low
+                                  - medium
+                                  - high
+                                  - xhigh
+                                  - max
+                                  - null
+                                description: "Effort override for every entry of the tier whose provider accepts one; null: each entry keeps its configured effort."
+                              author:
+                                type: string
+                                pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+                              created_at:
+                                type: string
+                                format: date-time
+                            required:
+                              - issue_key
+                              - role
+                              - tier
+                              - effort
+                              - author
+                              - created_at
+                            examples:
+                              - issue_key: SAMPLE-123
+                                role: swe
+                                tier: med
+                                effort: xhigh
+                                author: operator
+                                created_at: 2026-11-07T12:00:00.000Z
+                          description: Operator model-tier pins (at most one per role), applied when each later attempt is picked up until cleared.
                       required:
                         - issue_key
                         - notes
@@ -5533,6 +6562,7 @@ paths:
                         - latest_state
                         - last_activity_at
                         - attempts_with_current_notes
+                        - tier_pins
                       examples:
                         - issue_key: SAMPLE-123
                           notes: []
@@ -5544,6 +6574,7 @@ paths:
                           latest_state: null
                           last_activity_at: null
                           attempts_with_current_notes: 0
+                          tier_pins: []
                 required:
                   - tickets
               example:
@@ -8296,6 +9327,8 @@ paths:
                             - job_resumed
                             - provider_gate_opened
                             - provider_gate_closed
+                            - tier_selected
+                            - tier_escalated
                         job_id:
                           type:
                             - string
@@ -8394,6 +9427,27 @@ paths:
                           type: string
                           format: date-time
                           description: "job_paused: when the attempt is due to resume; provider_gate_opened: when the new-ticket gate lifts at the latest."
+                        tier:
+                          type: string
+                          maxLength: 60
+                          pattern: ^[a-z0-9][a-z0-9_:-]*$
+                          description: Model tier step (`tier` or `tier:effort`) of a ladder role call, tier_selected or tier_escalated event.
+                        model:
+                          type: string
+                          maxLength: 200
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$
+                          description: Model passed to the provider CLI for this call, when one was configured.
+                        effort:
+                          type: string
+                          enum:
+                            - none
+                            - minimal
+                            - low
+                            - medium
+                            - high
+                            - xhigh
+                            - max
+                          description: "Reasoning effort passed to the provider CLI for this call (absent: the CLI default)."
                       required:
                         - event_id
                         - at
@@ -8682,6 +9736,8 @@ paths:
                             - job_resumed
                             - provider_gate_opened
                             - provider_gate_closed
+                            - tier_selected
+                            - tier_escalated
                         job_id:
                           type:
                             - string
@@ -8780,6 +9836,27 @@ paths:
                           type: string
                           format: date-time
                           description: "job_paused: when the attempt is due to resume; provider_gate_opened: when the new-ticket gate lifts at the latest."
+                        tier:
+                          type: string
+                          maxLength: 60
+                          pattern: ^[a-z0-9][a-z0-9_:-]*$
+                          description: Model tier step (`tier` or `tier:effort`) of a ladder role call, tier_selected or tier_escalated event.
+                        model:
+                          type: string
+                          maxLength: 200
+                          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$
+                          description: Model passed to the provider CLI for this call, when one was configured.
+                        effort:
+                          type: string
+                          enum:
+                            - none
+                            - minimal
+                            - low
+                            - medium
+                            - high
+                            - xhigh
+                            - max
+                          description: "Reasoning effort passed to the provider CLI for this call (absent: the CLI default)."
                       required:
                         - event_id
                         - at

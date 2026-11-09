@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { isAbsolute } from 'node:path';
 import { ERROR_CODES } from './errors.js';
 import { toolchainSelectionSchema } from './toolchain.js';
+import { effortSchema, PROVIDER_EFFORTS } from './config.js';
 import { identifierSchema, issueKeySchema, jobIdSchema, modelSchema, providerSchema, roleSchema, timestampSchema } from './domain.js';
 
 const localPath = z.string().min(1).refine((path) => isAbsolute(path) && !/[\x00\r\n]/.test(path), 'Expected an absolute local path');
@@ -10,7 +11,10 @@ export const providerRequestSchema = z.strictObject({
   model: modelSchema.optional(), cwd: localPath, prompt_path: localPath, transcript_path: localPath,
   timeout_ms: z.number().int().positive().max(3_600_000), source_access: z.enum(['read', 'write']), auth_profile: identifierSchema,
   toolchain: toolchainSelectionSchema.optional(),
-}).refine((request) => request.role === 'swe' || request.source_access === 'read', 'QA and reviewer require source-read access');
+  /** Reasoning effort passed to the CLI (claude --effort, codex -c model_reasoning_effort); absent = CLI default. */
+  effort: effortSchema.optional(),
+}).refine((request) => request.role === 'swe' || request.source_access === 'read', 'QA and reviewer require source-read access')
+  .refine((request) => request.effort === undefined || PROVIDER_EFFORTS[request.provider].includes(request.effort), 'Reasoning effort is not supported by this provider');
 
 export const providerResultSchema = z.strictObject({
   provider: providerSchema, role: roleSchema, status: z.enum(['SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT']),

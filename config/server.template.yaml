@@ -55,6 +55,26 @@ providers:
   codex: {binary: codex, auth_profile: pilot}
   cursor: {binary: cursor-agent, auth_profile: pilot} # Cursor CLI (installed as agent/cursor-agent); model is always "auto"
 
+# Optional cost control (opt-in): model tiers (size classes) and per-role ladders, cheapest tier first. To use it,
+# uncomment models/model_tiers (and triage) and replace a role's provider/model/fallbacks with `ladder:` (docs/local-pilot.md
+# "Model tiers"). A tier is an ordered list of 1-3 entries {provider, model, effort}; entries are tried in order when one
+# fails on the provider side (limit, outage, auth, timeout, context/output), keeping the SWE handoff. A failed check/QA/review
+# (or a tier whose last entry hit CONTEXT/INVALID_OUTPUT) moves the role to its next tier. Effort per entry: claude
+# low|medium|high|xhigh|max; codex none|minimal|low|medium|high|xhigh|max; omit for the CLI default; cursor: model auto, no
+# effort. `models` names reusable models so entries can be written `luna:high`. `min` is a floor nothing goes below.
+# Pin a ticket's start tier with `autos tier KEY med [--effort xhigh]` (works before Autos has seen the ticket).
+# models:
+#   luna:  {provider: codex, model: gpt-6-luna}
+#   terra: {provider: codex, model: gpt-6-terra}
+# model_tiers:
+#   sm:  [{provider: claude, model: haiku, effort: high}, luna:high]
+#   med: [terra:high, {provider: claude, model: sonnet, effort: high}, {provider: cursor, model: auto}]
+#   lg:  [{provider: codex, model: gpt-6-sol, effort: xhigh}, {provider: claude, model: opus, effort: max}]
+# triage: {enabled: true, tier: sm, timeout_ms: 180000}   # one read-only call per new ticket picks start tiers
+# agents:
+#   swe:      {timeout_ms: 1800000, ladder: [sm, med, lg]}
+#   qa:       {timeout_ms: 900000,  ladder: [med, lg]}
+#   reviewer: {timeout_ms: 900000,  ladder: [med, lg], min: med}
 agents:
   # Fallbacks run in order after AUTH/RATE_LIMIT/UPSTREAM/UNAVAILABLE/TIMEOUT/INVALID_OUTPUT/CONTEXT failures.
   # Each role tries all three subscriptions before blocking; profiles decide subscription vs API billing.

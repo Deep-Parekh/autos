@@ -122,8 +122,11 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Contr
   }
   const workflow: WorkflowServicePort = {
     submit: (key, dryRun, notes) => closed ? Promise.reject(new AutosError('CONFLICT', 'Runtime is closed')) : service.submit(key, dryRun, notes),
-    revise: (id, note, author) => closed ? Promise.reject(new AutosError('CONFLICT', 'Runtime is closed')) : service.revise(id, note, author),
-    reviseIssue: (key, note, author) => closed ? Promise.reject(new AutosError('CONFLICT', 'Runtime is closed')) : service.reviseIssue(key, note, author),
+    revise: (id, note, author, pin) => closed ? Promise.reject(new AutosError('CONFLICT', 'Runtime is closed')) : service.revise(id, note, author, pin),
+    reviseIssue: (key, note, author, pin) => closed ? Promise.reject(new AutosError('CONFLICT', 'Runtime is closed')) : service.reviseIssue(key, note, author, pin),
+    setTierPin: (key, pin, author) => closed ? Promise.reject(new AutosError('CONFLICT', 'Runtime is closed')) : service.setTierPin(key, pin, author),
+    clearTierPins: (key, role) => closed ? Promise.reject(new AutosError('CONFLICT', 'Runtime is closed')) : service.clearTierPins(key, role),
+    tierPins: (key) => service.tierPins(key),
     closeIssue: (key, request, author) => closed ? Promise.reject(new AutosError('CONFLICT', 'Runtime is closed')) : service.closeIssue(key, request, author),
     closure: (key) => service.closure(key),
     addTicketNote: (key, note, author) => closed ? Promise.reject(new AutosError('CONFLICT', 'Runtime is closed')) : service.addTicketNote(key, note, author),

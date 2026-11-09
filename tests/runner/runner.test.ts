@@ -428,3 +428,18 @@ test('supervisor start script validates environment, treats empty strings as uns
   assert.equal(profile.status, 2);
   assert.match(profile.stderr, /AUTOS_PROVIDER_PROFILES_FILE is unreadable/);
 });
+
+test('DockerRunner forwards a validated reasoning effort to the worker as its own argument', async () => {
+  const paths = await fixture();
+  const executor = new FakeDocker();
+  try {
+    const runner = new DockerRunner({ workerImage: 'worker:test', checksImage: 'checks:test', workspaceRoot: paths.workspaceRoot, promptRoot: paths.promptRoot, outputRoot: paths.outputRoot, executor, testOnly: true });
+    assert.equal((await runner.runRole({ ...request(paths), effort: 'xhigh' })).status, 'SUCCEEDED');
+    const args = executor.calls[0]!.args; const worker = args.slice(args.indexOf('worker:test'));
+    assert.equal(worker[worker.indexOf('--effort') + 1], 'xhigh');
+    executor.calls = [];
+    assert.equal((await runner.runRole(request(paths))).status, 'SUCCEEDED');
+    assert.equal(executor.calls[0]!.args.includes('--effort'), false);
+    await assert.rejects(() => runner.runRole({ ...request(paths), provider: 'cursor', effort: 'high' }));
+  } finally { await rm(paths.root, { recursive: true, force: true }); }
+});
