@@ -39,7 +39,7 @@ function setup(jiraExists?: (key: string) => Promise<boolean>) {
       if (key.startsWith('BAD-')) throw new AutosError('INVALID_INPUT', `project not allowed ${SECRET}`);
       if (key === 'DONE-1') throw new AutosError('CONFLICT', `closed ${SECRET}`);
       const own = notes.get(key) ?? [];
-      if (own.length >= MAX_TICKET_NOTES) throw new AutosError('CONFLICT', 'too many');
+      if (own.length >= MAX_TICKET_NOTES) throw new AutosError('CONFLICT', `Issue already has ${MAX_TICKET_NOTES} ticket notes`);
       const stored: TicketNote = { note_id: randomUUID(), issue_key: key, instructions: note.instructions, roles: note.roles ?? ['swe'], author, created_at: now };
       notes.set(key, [...own, stored]);
       return stored;
@@ -124,7 +124,9 @@ test('POST notes maps wrong project to 400, closed or too many to 409, without l
     const closed = await call(app, 'POST', '/v1/issues/DONE-1/notes', { payload: { instructions: SECRET } });
     assert.equal(closed.statusCode, 409); assert.equal(closed.json().code, 'CONFLICT'); assert.doesNotMatch(closed.body, /ZEBRA/);
     for (let i = 0; i < MAX_TICKET_NOTES; i++) assert.equal((await call(app, 'POST', '/v1/issues/FULL-1/notes', { payload: { instructions: `n${i}` } })).statusCode, 201);
-    assert.equal((await call(app, 'POST', '/v1/issues/FULL-1/notes', { payload: { instructions: SECRET } })).statusCode, 409);
+    const full = await call(app, 'POST', '/v1/issues/FULL-1/notes', { payload: { instructions: SECRET } });
+    assert.equal(full.statusCode, 409); assert.equal(full.json().message, `Issue already has ${MAX_TICKET_NOTES} ticket notes`, 'known conflicts explain themselves');
+    assert.equal(closed.json().message, 'The request conflicts with current state', 'unlisted conflict text stays generic');
     assert.equal(f.logs.join('').includes('ZEBRA'), false);
   } finally { await app.close(); }
 });
@@ -269,6 +271,9 @@ test('autos note warns when Jira does not know the key, still keeps the note, an
     const printed = JSON.parse(out.join('\n')); assert.equal(printed.jira, 'not_found'); assert.deepEqual(printed.notes[0].roles, ['qa']);
     err.length = 0; assert.equal(await run('note', 'BAD-1', '--swe', SECRET), 2); assert.match(err[0]!, /INVALID_INPUT/); assert.doesNotMatch(err.join(''), /ZEBRA/);
     err.length = 0; assert.equal(await run('note', 'DONE-1', '--swe', SECRET), 1); assert.match(err[0]!, /CONFLICT/);
+    for (let i = 0; i < MAX_TICKET_NOTES; i++) assert.equal(await run('note', 'FULL-2', '--swe', `n${i}`), 0);
+    err.length = 0; assert.equal(await run('note', 'FULL-2', '--qa', 'one more'), 1);
+    assert.match(err[0]!, new RegExp(`Controller rejected the request: Issue already has ${MAX_TICKET_NOTES} ticket notes`));
     assert.equal(await main(['--config', configPath, 'note', 'NEW-5', '--swe', 'x'], { ...deps, env: {} }), 1);
     assert.equal(await main(['--config', configPath, 'note', 'NEW-5', '--swe', 'x'], { ...deps, env: { [config.api.operator_token_env]: 'wrong-token-wrong-token' } }), 1);
     assert.match(err.at(-1)!, /AUTH/);

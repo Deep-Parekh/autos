@@ -335,6 +335,13 @@ async function controllerFetch(url: URL, token: string, init: { signal?: AbortSi
   try { response = await fetch(url, { signal: init.signal ?? null, method: init.method ?? 'GET', ...(init.body !== undefined ? { body: init.body } : {}), headers: { authorization: `Bearer ${token}`, ...init.headers } }); }
   catch (error) { if (init.signal?.aborted) throw error; throw unreachable(); }
   if (!response.ok) {
+    if (response.status === 409) {
+      // The controller explains conflicts (note limit, closed issue, active attempt); show its reason when it gave one.
+      const body: unknown = await response.json().catch(() => null);
+      const message = isRecord(body) && typeof body.message === 'string' ? body.message.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 300) : '';
+      if (message && message !== 'The request conflicts with current state') throw new AutosError('CONFLICT', `Controller rejected the request: ${message}`);
+      throw httpFailure(409);
+    }
     if (init.reason && response.status === 400) {
       const body: unknown = await response.json().catch(() => null);
       const message = isRecord(body) && typeof body.message === 'string' ? body.message.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 300) : '';

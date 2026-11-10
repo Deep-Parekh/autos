@@ -605,7 +605,10 @@ export async function createController(options: ControllerOptions): Promise<Fast
     const status = error.validation ? 400 : known ? (statuses[known.code] ?? 500) : 500;
     const code = error.validation ? 'INVALID_INPUT' : known?.code ?? 'INTERNAL';
     request.log.warn({ event: 'request_error', request_id: request.id, route: request.routeOptions?.url ?? 'unmatched', status, code });
-    const message = error.validation ? 'Request does not match the endpoint schema' : messages[code] ?? 'Request could not be completed';
+    // Known, fixed CONFLICT explanations (note limit, closed issue, active attempt, ...) are passed on so operators see why.
+    // Only messages on this allowlist go out; anything else keeps the generic text, so no free text can leak.
+    const conflict = known?.code === 'CONFLICT' && PUBLIC_CONFLICTS.some((pattern) => pattern.test(known.message)) ? known.message : '';
+    const message = error.validation ? 'Request does not match the endpoint schema' : conflict || (messages[code] ?? 'Request could not be completed');
     reply.code(status).send({ code, message, request_id: request.id });
   });
   app.setNotFoundHandler((request, reply) => reply.code(404).send({ code: 'NOT_FOUND', message: 'Resource not found', request_id: request.id }));
@@ -947,6 +950,21 @@ export async function createController(options: ControllerOptions): Promise<Fast
 }
 
 /** Return the code-first OpenAPI document used by `autos docs validate`. */
+/** CONFLICT messages the workflow raises that are safe and useful to show operators verbatim. */
+const PUBLIC_CONFLICTS: readonly RegExp[] = [
+  /^Issue already has \d{1,3} ticket notes$/,
+  /^Issue is (?:already )?closed \((?:MERGED|ABANDONED)\)$/i,
+  /^Issue already has an active attempt$/,
+  /^Issue has an active attempt; cancel it or wait before closing$/,
+  /^Issue already has an attempt in this mode; use explicit retry for a blocked attempt$/,
+  /^Only a READY_FOR_HUMAN job can be revised$/,
+  /^Only the latest READY_FOR_HUMAN attempt of an issue can be revised$/,
+  /^A dry run cannot be revised$/,
+  /^Revision limit reached for this issue$/,
+  /^MERGED requires a READY_FOR_HUMAN attempt with a commit$/,
+  /^Only blocked or cancelled jobs can be retried$/,
+];
+
 export async function generateOpenApi(options: ControllerOptions): Promise<Record<string, unknown>> {
   const app = await createController({ ...options, close: async () => undefined });
   try {
