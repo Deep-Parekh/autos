@@ -134,3 +134,10 @@ api:
   listen_host: 127.0.0.1
   port: 8787
   operator_token_env: AUTOS_OPERATOR_TOKEN
+
+# Optional Teams notifications (`autos teams relay`, docs/teams.md). The webhook URL is a secret: put it in .env.
+# notifications:
+#   teams:
+#     webhook_url_env: AUTOS_TEAMS_WEBHOOK_URL
+#     notify: [READY_FOR_HUMAN, BLOCKED, PAUSED]   # also: CANCELLED, PLANNED, TIER_ESCALATED, PROVIDER_GATE
+#     include_commands: true                       # copyable `autos ...` next steps on each card
