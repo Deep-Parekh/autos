@@ -139,3 +139,7 @@ api:
 #     webhook_url_env: AUTOS_TEAMS_WEBHOOK_URL
 #     notify: [READY_FOR_HUMAN, BLOCKED, PAUSED]   # also: CANCELLED, PLANNED, TIER_ESCALATED, PROVIDER_GATE
 #     include_commands: true                       # copyable `autos ...` next steps on each card
+#     auth:                                        # only if the workflow requires sign-in (docs/teams.md)
+#       tenant_id: 00000000-0000-0000-0000-000000000000
+#       client_id: 00000000-0000-0000-0000-000000000000
+#       client_secret_env: AUTOS_TEAMS_CLIENT_SECRET

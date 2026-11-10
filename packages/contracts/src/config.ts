@@ -174,6 +174,11 @@ const binarySchema = z.strictObject({ binary: z.string().min(1), auth_profile: i
  */
 export const TEAMS_NOTIFY_KINDS = ['READY_FOR_HUMAN', 'BLOCKED', 'CANCELLED', 'PLANNED', 'PAUSED', 'TIER_ESCALATED', 'PROVIDER_GATE'] as const;
 export type TeamsNotifyKind = typeof TEAMS_NOTIFY_KINDS[number];
+/** Microsoft clouds whose Power Automate audience the Teams relay can request tokens for. */
+export const TEAMS_CLOUDS = ['public', 'gcc', 'gcch', 'dod', 'china'] as const;
+export type TeamsCloud = typeof TEAMS_CLOUDS[number];
+/** An Entra ID tenant or application (client) ID: a GUID. */
+const entraIdSchema = z.string().regex(/^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$/, 'must be a GUID');
 const notificationsSchema = z.strictObject({
   /**
    * Teams notifications through a Workflows webhook ("Post to a channel when a webhook request is received").
@@ -186,6 +191,17 @@ const notificationsSchema = z.strictObject({
     notify: z.array(z.enum(TEAMS_NOTIFY_KINDS)).min(1).default(['READY_FOR_HUMAN', 'BLOCKED', 'PAUSED']),
     /** Add copyable `autos …` follow-up commands (show, revise, close, retry) to each card. */
     include_commands: z.boolean().default(true),
+    /**
+     * Sign each post with a Microsoft Entra ID app token, for workflows whose trigger is set to "Any user in my tenant"
+     * or "Specific users in my tenant" (tenants that do not allow "Anyone"). The relay uses the client-credentials grant
+     * for the Power Automate audience of `cloud`. Only the secret is sensitive: it lives in `client_secret_env`.
+     */
+    auth: z.strictObject({
+      tenant_id: entraIdSchema,
+      client_id: entraIdSchema,
+      client_secret_env: envNameSchema,
+      cloud: z.enum(TEAMS_CLOUDS).default('public'),
+    }).optional(),
   }).optional(),
 });
 

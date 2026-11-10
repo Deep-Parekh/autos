@@ -7,7 +7,7 @@ import type { FastifyInstance } from 'fastify';
 import { parseConfigYaml, type JobRecord, type WorkflowServicePort } from '@autos/contracts';
 import { createController, type ControllerOptions } from '../../apps/controller/src/index.js';
 import { main } from '../../apps/cli/src/index.js';
-import { buildTeamsMessage, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, TierTracker } from '../../apps/cli/src/teams.js';
+import { buildTeamsMessage, EntraTokenSource, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, TierTracker } from '../../apps/cli/src/teams.js';
 import { makeEvent, monitorPort } from './monitor-fake.js';
 
 const canonical = await readFile(new URL('../../config/config.example.yaml', import.meta.url), 'utf8');
@@ -137,5 +137,64 @@ test('autos teams test posts one connectivity card; missing configuration or web
     const plain = join(dir, 'plain.yaml'); await writeFile(plain, canonical);
     assert.equal(await main(['--config', plain, 'teams', 'test'], { cwd: dir, env: { AUTOS_TEAMS_WEBHOOK_URL: WEBHOOK }, stdout: () => undefined, stderr: (l) => err.push(l), teamsFetch }), 1);
     assert.match(err.join('\n'), /notifications\.teams is not configured/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+const TENANT = '11111111-2222-3333-4444-555555555555'; const CLIENT = '66666666-7777-8888-9999-aaaaaaaaaaaa';
+const authBlock = (cloud = '') => `    auth:\n      tenant_id: ${TENANT}\n      client_id: ${CLIENT}\n      client_secret_env: AUTOS_TEAMS_CLIENT_SECRET\n${cloud}`;
+
+test('teams auth config: GUIDs required, cloud defaults to public', () => {
+  assert.deepEqual(parseConfigYaml(withTeams(authBlock())).notifications?.teams?.auth, { tenant_id: TENANT, client_id: CLIENT, client_secret_env: 'AUTOS_TEAMS_CLIENT_SECRET', cloud: 'public' });
+  assert.equal(parseConfigYaml(withTeams(authBlock('      cloud: gcch\n'))).notifications?.teams?.auth?.cloud, 'gcch');
+  assert.throws(() => parseConfigYaml(withTeams(authBlock().replace(TENANT, 'contoso.onmicrosoft.com'))));
+  assert.throws(() => parseConfigYaml(withTeams(authBlock('      client_secret: inline\n'))), 'secrets never go in the config file');
+});
+
+test('Entra token source: client-credentials for the Power Automate audience, cached, errors never leak the secret', async () => {
+  let now = 1_000_000; const requests: Array<{ url: string; body: URLSearchParams; redirect?: RequestRedirect | undefined }> = [];
+  const replies: Array<() => Response> = [() => Response.json({ access_token: 'tok-1', expires_in: 3600, token_type: 'Bearer' })];
+  const fake = async (url: URL, init: RequestInit) => { requests.push({ url: url.toString(), body: new URLSearchParams(String(init.body)), redirect: init.redirect }); return replies.shift()!(); };
+  const source = new EntraTokenSource({ tenantId: TENANT, clientId: CLIENT, clientSecret: 'S3CRET-VALUE', cloud: 'public', fetch: fake, now: () => now });
+  assert.equal(await source.token(), 'tok-1'); assert.equal(await source.token(), 'tok-1');
+  assert.equal(requests.length, 1, 'cached');
+  assert.equal(requests[0]!.url, `https://login.microsoftonline.com/${TENANT}/oauth2/v2.0/token`);
+  assert.deepEqual(Object.fromEntries(requests[0]!.body), { grant_type: 'client_credentials', client_id: CLIENT, client_secret: 'S3CRET-VALUE', scope: 'https://service.flow.microsoft.com//.default' });
+  assert.equal(requests[0]!.redirect, 'error');
+  now += 3301 * 1000; replies.push(() => Response.json({ access_token: 'tok-2', expires_in: '3599' }));
+  assert.equal(await source.token(), 'tok-2', 'refreshed five minutes before expiry');
+  source.invalidate();
+  replies.push(() => Response.json({ error: 'invalid_client', error_description: 'AADSTS7000215: Invalid client secret S3CRET-VALUE provided' }, { status: 401 }));
+  await assert.rejects(source.token(), (error: Error) => /HTTP 401, invalid_client/.test(error.message) && !error.message.includes('S3CRET') && !error.message.includes('AADSTS'));
+  const gcch = new EntraTokenSource({ tenantId: TENANT, clientId: CLIENT, clientSecret: 's', cloud: 'gcch', fetch: async (url, init) => { requests.push({ url: url.toString(), body: new URLSearchParams(String(init.body)) }); return Response.json({ access_token: 't', expires_in: 60 }); } });
+  await gcch.token();
+  assert.equal(requests.at(-1)!.url, `https://login.microsoftonline.us/${TENANT}/oauth2/v2.0/token`);
+  assert.equal(requests.at(-1)!.body.get('scope'), 'https://high.service.flow.microsoft.us//.default');
+});
+
+test('autos teams test signs posts with a bearer token, refreshes once on 401, explains an unsigned 401', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'autos-teams-auth-'));
+  try {
+    const configPath = join(dir, 'autos.yaml'); await writeFile(configPath, withTeams(authBlock()));
+    const env = { AUTOS_TEAMS_WEBHOOK_URL: WEBHOOK, AUTOS_TEAMS_CLIENT_SECRET: 'S3CRET-VALUE' };
+    let issued = 0; const webhookAuth: Array<string | undefined> = []; const webhookStatuses = [401, 202]; const out: string[] = []; const err: string[] = [];
+    const teamsFetch = async (url: URL, init: RequestInit) => {
+      if (url.hostname === 'login.microsoftonline.com') { issued++; return Response.json({ access_token: `tok-${issued}`, expires_in: 3600 }); }
+      webhookAuth.push((init.headers as Record<string, string>).authorization); return new Response(null, { status: webhookStatuses.shift()! });
+    };
+    assert.equal(await main(['--config', configPath, 'teams', 'test'], { cwd: dir, env, stdout: (l) => out.push(l), stderr: (l) => err.push(l), teamsFetch, teamsRetryDelayMs: 1 }), 0);
+    assert.deepEqual(webhookAuth, ['Bearer tok-1', 'Bearer tok-2'], 'a refused token is replaced once');
+    assert.match(out.join(''), /delivered \(HTTP 202\)/);
+    // Wrong secret: fails at once with a config error, no secret in the output.
+    const badFetch = async (url: URL) => url.hostname === 'login.microsoftonline.com' ? Response.json({ error: 'invalid_client' }, { status: 401 }) : new Response(null, { status: 202 });
+    assert.equal(await main(['--config', configPath, 'teams', 'test'], { cwd: dir, env, stdout: (l) => out.push(l), stderr: (l) => err.push(l), teamsFetch: badFetch, teamsRetryDelayMs: 1 }), 1);
+    assert.match(err.join('\n'), /Teams app sign-in failed \(HTTP 401, invalid_client\)/);
+    // Missing secret variable.
+    assert.equal(await main(['--config', configPath, 'teams', 'test'], { cwd: dir, env: { AUTOS_TEAMS_WEBHOOK_URL: WEBHOOK }, stdout: () => undefined, stderr: (l) => err.push(l), teamsFetch }), 1);
+    assert.match(err.join('\n'), /AUTOS_TEAMS_CLIENT_SECRET must be set/);
+    // No auth configured and the trigger demands sign-in: a 401 with a pointer to the fix.
+    const plain = join(dir, 'plain.yaml'); await writeFile(plain, withTeams()); const plainOut: string[] = [];
+    assert.equal(await main(['--config', plain, 'teams', 'test'], { cwd: dir, env, stdout: (l) => plainOut.push(l), stderr: () => undefined, teamsFetch: async () => new Response(null, { status: 401 }) }), 1);
+    assert.match(plainOut.join(''), /HTTP 401\)\. The workflow requires sign-in: set notifications\.teams\.auth/);
+    assert.ok(![...out, ...err, ...plainOut].join('\n').includes('S3CRET'));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });

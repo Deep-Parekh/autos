@@ -9,7 +9,7 @@ import type { OperatorNoteRequest, WorkflowServicePort } from '@autos/contracts'
 import type { ControllerOptions, LoopStatus, ProviderDiagnostic, StatusResponse } from '@autos/controller';
 import { pollDelayMs, runControllerLoop, waitForSignalOrTimeout, type LoopSleep } from './loop.js';
 import { deepChecks, formatChecks, type CheckResult, type DeepDoctorDeps } from './deep-doctor.js';
-import { buildTeamsMessage, cursorPath, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, readCursor, TierTracker, writeCursor, type FetchLike } from './teams.js';
+import { buildTeamsMessage, cursorPath, EntraTokenSource, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, readCursor, TierTracker, writeCursor, type FetchLike } from './teams.js';
 
 export interface CliRuntime extends Omit<ControllerOptions, 'operatorToken' | 'fastifyOptions' | 'bindHost'> {
   testProviders(): Promise<ProviderDiagnostic[]>;
@@ -494,13 +494,21 @@ async function watchEvents(base: URL, token: string, options: MonitorOptions, js
 
 // ---- Teams notifications (phase 1: one-way, outbound only) ----
 
+function requireEnv(env: Record<string, string | undefined>, name: string): string {
+  const value = env[name]?.trim();
+  if (!value) throw new AutosError('INVALID_CONFIG', `Environment variable ${name} must be set`);
+  return value;
+}
 const teamsUsage = 'Usage: autos teams relay [--from-start] [--url URL] | autos teams test';
 async function teamsCommand(args: string[], config: AutosConfig, json: boolean, dependencies: CliDependencies, stdout: (text: string) => void, stderr: (text: string) => void): Promise<number> {
   const teams = config.notifications?.teams;
   if (!teams) throw new AutosError('INVALID_CONFIG', 'notifications.teams is not configured (see docs/teams.md)');
   const env = dependencies.env ?? process.env;
   const webhook = parseTeamsWebhookUrl(env[teams.webhook_url_env], teams.webhook_url_env);
-  const delivery = { ...(dependencies.teamsFetch ? { fetch: dependencies.teamsFetch } : {}), ...(dependencies.teamsRetryDelayMs !== undefined ? { retryDelayMs: dependencies.teamsRetryDelayMs } : {}) };
+  const auth = teams.auth ? new EntraTokenSource({ tenantId: teams.auth.tenant_id, clientId: teams.auth.client_id, clientSecret: requireEnv(env, teams.auth.client_secret_env), cloud: teams.auth.cloud, ...(dependencies.teamsFetch ? { fetch: dependencies.teamsFetch } : {}), ...(dependencies.now ? { now: dependencies.now } : {}) }) : undefined;
+  const delivery = { ...(dependencies.teamsFetch ? { fetch: dependencies.teamsFetch } : {}), ...(dependencies.teamsRetryDelayMs !== undefined ? { retryDelayMs: dependencies.teamsRetryDelayMs } : {}), ...(auth ? { auth } : {}) };
+  // 401 without sign-in configured: the workflow trigger is restricted to tenant users (see docs/teams.md, "Sign-in").
+  const hint = (status: number | null) => status === 401 ? (auth ? ' The token was refused: check that the trigger allows this app (its Enterprise application object ID) and the cloud setting.' : ' The workflow requires sign-in: set notifications.teams.auth (docs/teams.md, "Tenants that require sign-in").') : status === 403 ? ' The app is not allowed to trigger this workflow: add its Enterprise application object ID to the trigger\'s allowed users.' : '';
   if (args[0] === 'test' && args.length === 1) {
     const at = new Date(dependencies.now?.() ?? Date.now()).toISOString();
     const payload = buildTeamsMessage({ event_id: 1, at, type: 'job_finished', job_id: null, issue_key: null, state: 'PLANNED' }, 'PLANNED', {}, config);
@@ -508,7 +516,7 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
     const content = (payload.attachments as Array<{ content: { body: Array<{ text?: string }> } }>)[0]!.content;
     content.body[0]!.text = '🔔 Autos Teams notifications are connected'; content.body.splice(2);
     const result = await postTeamsMessage(webhook, payload, delivery);
-    report(json ? { delivered: result.ok, status: result.status } : result.ok ? `Test card delivered (HTTP ${result.status}).` : `Test card was not delivered (${result.status === null ? 'network error' : `HTTP ${result.status}`}).`, json, stdout);
+    report(json ? { delivered: result.ok, status: result.status } : result.ok ? `Test card delivered (HTTP ${result.status}).` : `Test card was not delivered (${result.status === null ? 'network error' : `HTTP ${result.status}`}).${hint(result.status)}`, json, stdout);
     return result.ok ? 0 : 1;
   }
   if (args[0] !== 'relay') throw new AutosError('INVALID_INPUT', teamsUsage);
@@ -540,7 +548,7 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
       const result = await postTeamsMessage(webhook, buildTeamsMessage(event, kind, { job, tier: tiers.get(event.job_id) }, config), { ...delivery, signal: abort.signal });
       // At-least-once while the relay runs; a card that still fails after retries is logged and skipped so one bad
       // delivery cannot stall every later notification.
-      log(result.ok ? { event: 'teams_notified', kind, issue_key: event.issue_key, event_id: event.event_id } : { event: 'teams_delivery_failed', kind, issue_key: event.issue_key, event_id: event.event_id, status: result.status });
+      log(result.ok ? { event: 'teams_notified', kind, issue_key: event.issue_key, event_id: event.event_id } : { event: 'teams_delivery_failed', kind, issue_key: event.issue_key, event_id: event.event_id, status: result.status, ...(hint(result.status) ? { hint: hint(result.status).trim() } : {}) });
     }
     if (event.type === 'job_finished') tiers.forget(event.job_id);
     cursor = event.event_id; await writeCursor(cursorFile, cursor);
