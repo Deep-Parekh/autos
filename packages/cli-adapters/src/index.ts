@@ -415,8 +415,15 @@ const AUTH_PATTERN = /\b(?:unauthori[sz]ed|authentication(?:_error)?|not authent
 const RATE_PATTERN = /\b(?:rate[ _-]?limit(?:ed|_exceeded)?|too many requests|quota exceeded|insufficient_quota|usage limit(?: reached)?|credit balance is too low|insufficient[ _]credits?|billing|payment required)\b|\b(?:http|status|error)[:= ]{1,3}(?:429|402)\b/i;
 const UPSTREAM_PATTERN = /\b(?:overloaded(?:_error)?|service unavailable|bad gateway|gateway time-?out|internal server error|server_error|api_error|econnreset|econnrefused|etimedout|enotfound|eai_again|socket hang up|network error|connection (?:error|reset|refused|timed out)|fetch failed|temporarily unavailable)\b|\b(?:http|status|error)[:= ]{1,3}5\d\d\b/i;
 
+/**
+ * The provider refused the configured model (unknown name, or not offered on this account/plan). UNAVAILABLE is
+ * fallback-eligible, so the next entry of the tier or chain is tried instead of blocking the job.
+ */
+const MODEL_UNAVAILABLE_PATTERN = /\bmodel_not_found\b|\b(?:the )?['"`]?[\w.:-]*['"`]? ?model (?:is not supported|is not available|does not exist|not found)\b|\b(?:unknown|invalid|unsupported) model\b|\bnot_found_error\b[^\n]{0,80}\bmodel\b/i;
+
 /** Classifies only already-extracted error signals; callers must never pass assistant narrative. */
-function classifyText(text: string): 'CONTEXT' | 'AUTH' | 'RATE_LIMIT' | 'UPSTREAM' | 'TOOL' {
+function classifyText(text: string): 'CONTEXT' | 'AUTH' | 'RATE_LIMIT' | 'UPSTREAM' | 'UNAVAILABLE' | 'TOOL' {
+  if (MODEL_UNAVAILABLE_PATTERN.test(text)) return 'UNAVAILABLE';
   if (CONTEXT_PATTERN.test(text)) return 'CONTEXT';
   if (AUTH_PATTERN.test(text)) return 'AUTH';
   if (RATE_PATTERN.test(text)) return 'RATE_LIMIT';
@@ -475,13 +482,8 @@ function parseProviderOutput(provider: Provider, output: string): { ok: true; re
   if (!events) return { ok: false, kind: 'invalid' };
   const eventObjects = events.map(object);
   if (eventObjects.some((event) => event?.type === 'turn.failed' || event?.type === 'turn.error' || event?.type === 'error')) return { ok: false, kind: 'tool', code: classifyText(codexFailure(eventObjects)) };
-  const failedCommand = eventObjects.some((event) => {
-    if (event?.type !== 'item.completed') return false;
-    const item = object(event.item);
-    if (item?.type !== 'command_execution') return false;
-    return (typeof item.exit_code === 'number' && item.exit_code !== 0) || (typeof item.status === 'string' && !['completed', 'succeeded'].includes(item.status));
-  });
-  if (failedCommand) return { ok: false, kind: 'tool' };
+  // A shell command the agent ran exiting non-zero (grep with no match, a missing binary) is part of its normal work, not
+  // a provider failure: the role's result is its final structured message, checked by the workflow like any other.
   const terminal = eventObjects.findLast((event) => event?.type === 'turn.completed');
   if (!terminal) return { ok: false, kind: 'invalid' };
   if (eventObjects.at(-1) !== terminal) return { ok: false, kind: 'invalid' };

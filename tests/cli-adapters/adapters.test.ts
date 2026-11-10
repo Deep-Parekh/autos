@@ -52,7 +52,6 @@ test('rejects successful exit with failure envelope, malformed output, and missi
     ['cursor', `printf '%s' '{"type":"message","subtype":"success","result":"not a result envelope"}'`, 'INVALID_OUTPUT'],
     ['codex', `printf '%s\\n' '{"type":"thread.started"}'`, 'INVALID_OUTPUT'],
     ['codex', `printf '%s\\n' '{"type":"turn.completed","turn":{"status":"failed"}}'`, 'TOOL'],
-    ['codex', `printf '%s\\n' '{"type":"item.completed","item":{"type":"command_execution","status":"failed","exit_code":23}}' '{"type":"turn.completed"}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}'`, 'TOOL'],
     ['codex', `printf '%s\\n' '{"type":"error","message":"failure"}'`, 'TOOL'],
     ['codex', `printf '%s\\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed","usage":{}}' '{"type":"item.completed","item":{"type":"agent_message","text":"late"}}'`, 'INVALID_OUTPUT'],
   ];
@@ -228,5 +227,26 @@ test('codex and cursor never receive the Claude subscription token', async () =>
     const transcript = await readFile(f.transcript, 'utf8');
     assert.ok(!transcript.includes('sk-ant-oat01-FIXTURE'), provider);
     if (provider === 'cursor') assert.equal(result.result, 'unset');
+  }
+});
+
+test('a failed shell command inside a Codex turn does not fail the call when the agent still returns a final answer', async () => {
+  const f = await fixture('codex', `printf '%s\\n' '{"type":"item.completed","item":{"type":"command_execution","command":"git status","status":"failed","exit_code":127}}' '{"type":"item.completed","item":{"type":"command_execution","command":"rg x","status":"completed","exit_code":1}}' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}' '{"type":"turn.completed","usage":{}}'`);
+  const result = await f.adapter.run(f.request);
+  assert.equal(result.status, 'SUCCEEDED');
+  assert.equal(result.result, 'done');
+});
+
+test('a model the provider refuses is UNAVAILABLE (fallback-eligible), not TOOL', async () => {
+  const cases: [Provider, string][] = [
+    ['codex', `printf '%s\\n' '{"type":"turn.started"}' '{"type":"error","message":"{\\"type\\":\\"error\\",\\"status\\":400,\\"error\\":{\\"message\\":\\"The gpt-x model is not supported when using Codex with a ChatGPT account.\\",\\"code\\":\\"model_not_found\\"}}"}' '{"type":"turn.failed","error":{"message":"model_not_found"}}'`],
+    ['codex', `printf '%s\\n' 'error: unknown model gpt-zz' >&2; exit 1`],
+    ['claude', `printf '%s' '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"API Error: 404 {\\"type\\":\\"error\\",\\"error\\":{\\"type\\":\\"not_found_error\\",\\"message\\":\\"model: claude-nope\\"}}"}'`],
+  ];
+  for (const [provider, script] of cases) {
+    const f = await fixture(provider, script);
+    const result = await f.adapter.run(f.request);
+    assert.equal(result.status, 'FAILED', script);
+    assert.equal(result.error_code, 'UNAVAILABLE', script);
   }
 });
