@@ -168,6 +168,9 @@ const jobSchema = {
     parent_job_id: { type: 'string', format: 'uuid', description: 'Set on revision jobs: the READY_FOR_HUMAN job whose commit this attempt continues.' },
     revision: { type: 'integer', minimum: 0, maximum: 20, description: '0 for an initial attempt, n for the n-th requested revision of the same issue.' },
     closed_as: { type: 'string', enum: [...ISSUE_RESOLUTIONS], description: 'Set on every attempt of an issue the operator closed (MERGED or ABANDONED).' },
+    wip_commit_sha: { type: 'string', description: 'BLOCKED only: commit on the feature branch that preserves the attempt\'s unreviewed work. Not reviewed and not ready to merge; an explicit retry continues from it.' },
+    wip_push_status: { type: 'string', enum: ['PUSHED', 'FAILED', 'DISABLED'], description: 'BLOCKED only: whether that commit was pushed (bitbucket.push_blocked_attempts).' },
+    continues_job_id: { type: 'string', format: 'uuid', description: 'Set on a retry that continues an earlier blocked attempt\'s unreviewed work.' },
     resume_at: { type: 'string', format: 'date-time', description: 'PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff).' },
     pause_code: { type: 'string', enum: [...ERROR_CODES], description: 'PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran.' },
     paused_role: { type: 'string', enum: [...ROLES], description: 'PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider.' },
@@ -455,6 +458,8 @@ export function safeJob(job: JobRecord): JobRecord {
   if (job.feature_branch) clean.feature_branch = job.feature_branch;
   if (job.commit_sha) clean.commit_sha = job.commit_sha;
   if (job.closed_as) clean.closed_as = job.closed_as;
+  if (job.state === 'BLOCKED' && job.wip_commit_sha) { clean.wip_commit_sha = job.wip_commit_sha; if (job.wip_push_status) clean.wip_push_status = job.wip_push_status; }
+  if (job.continues_job_id) clean.continues_job_id = job.continues_job_id;
   if (job.state === 'PAUSED') {
     if (job.resume_at) clean.resume_at = job.resume_at;
     if (job.pause_code) clean.pause_code = job.pause_code;

@@ -22,6 +22,15 @@ export const jobRecordSchema = z.strictObject({
   parent_job_id: jobIdSchema.optional(),
   /** 0 for an initial attempt, n for the n-th human-requested revision of the same issue. */
   revision: z.number().int().min(0).max(20).optional(),
+  /**
+   * BLOCKED attempts only: the commit that preserves the attempt's unreviewed work on the feature branch (it never passed
+   * QA and review). An explicit retry continues from it instead of starting over from the base.
+   */
+  wip_commit_sha: gitShaSchema.optional(),
+  /** Whether that unreviewed commit was pushed (bitbucket.push_blocked_attempts). */
+  wip_push_status: z.enum(['PUSHED', 'FAILED', 'DISABLED']).optional(),
+  /** Set on a retry that continues an earlier blocked attempt's unreviewed work (that attempt's job id). */
+  continues_job_id: jobIdSchema.optional(),
   /** Issue-level: set on every attempt of an issue the operator closed (`autos close`). Closed issues accept no new attempts. */
   closed_as: z.enum(['MERGED', 'ABANDONED']).optional(),
   /** PAUSED only: when the attempt becomes due to resume (provider limit reset or backoff). */
@@ -273,7 +282,8 @@ export const WORKSPACE_DIR_NAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-
 /** Why a workspace is removable now (null = retained). */
 export const WORKSPACE_REMOVAL_REASONS = ['closed', 'superseded', 'retention', 'orphan'] as const;
 /** Why a workspace is kept. */
-export const WORKSPACE_RETENTION_REASONS = ['active', 'awaiting_review', 'within_retention'] as const;
+/** awaiting_retry: the issue's latest attempt is BLOCKED with preserved unreviewed work that a retry continues from. */
+export const WORKSPACE_RETENTION_REASONS = ['active', 'awaiting_review', 'awaiting_retry', 'within_retention'] as const;
 
 export const workspaceEntrySchema = z.strictObject({
   /** Directory basename under storage.workspaces_dir (never a full path). */

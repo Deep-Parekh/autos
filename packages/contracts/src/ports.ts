@@ -81,7 +81,11 @@ export interface GitRunnerPort {
   prepare(request: GitPrepareRequest, signal?: AbortSignal): Promise<GitWorkspace>;
   inspectCandidate(workspace: GitWorkspace, signal?: AbortSignal): Promise<GitCandidate>;
   commit(request: GitCommitRequest, signal?: AbortSignal): Promise<GitCommitResult>;
-  push(workspace: GitWorkspace, commitSha: string, signal?: AbortSignal): Promise<GitPushResult>;
+  /**
+   * `wip`: the commit preserves a BLOCKED attempt's unreviewed work; it is pushed only when the runner was configured to
+   * push blocked attempts (independent of pushing reviewed candidates). Same create-only / fast-forward-only rules.
+   */
+  push(workspace: GitWorkspace, commitSha: string, signal?: AbortSignal, options?: { wip?: boolean }): Promise<GitPushResult>;
   /**
    * Instruction files (see INSTRUCTION_FILE_PATTERNS) present in the tree of `commitSha` (normally the workspace's
    * start_sha: the checked-out branch head). Read with trusted Git object access, so agents cannot alter them.
@@ -153,6 +157,11 @@ export interface JobRecord {
   parent_job_id?: string;
   /** 0 for an initial attempt, n for the n-th human-requested revision. */
   revision?: number;
+  /** BLOCKED only: commit preserving the attempt's unreviewed work, and whether it was pushed (see jobRecordSchema). */
+  wip_commit_sha?: string;
+  wip_push_status?: 'PUSHED' | 'FAILED' | 'DISABLED';
+  /** A retry that continues an earlier blocked attempt's unreviewed work. */
+  continues_job_id?: string;
   /** Issue-level closure (see issueClosureSchema); closed issues accept no new attempt, revision or retry. */
   closed_as?: IssueResolution;
   /** PAUSED only (see jobRecordSchema): resume time, limit code, limited role, streak start and length. */

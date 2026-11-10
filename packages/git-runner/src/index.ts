@@ -44,6 +44,8 @@ export interface GitRunnerOptions {
   allowedRepositories: RepositoryConfig[];
   /** Push remains off unless the trusted controller explicitly enables it. */
   pushEnabled?: boolean;
+  /** Push commits that preserve BLOCKED attempts' unreviewed work (push(..., { wip: true })). */
+  pushBlockedEnabled?: boolean;
   /** Test-only map from exact repository identity to an absolute disposable bare remote. */
   testOnlyRemoteOverrides?: Array<{ repository: string; path: string }>;
   /** Trusted controller-only auth channel; never populated from role or repository data. */
@@ -168,6 +170,7 @@ interface WorkspaceRecord {
 export class GitRunner implements GitRunnerPort {
   private readonly repositories: Map<string, RepositoryConfig>;
   private readonly pushEnabled: boolean;
+  private readonly pushBlockedEnabled: boolean;
   private readonly testRemotes: Map<string, string>;
   private readonly trustedCredentials: GitRunnerOptions['trustedCredentials'];
   private readonly fetchTimeoutMs: number;
@@ -179,6 +182,7 @@ export class GitRunner implements GitRunnerPort {
       return [repositoryId(parsed), parsed];
     }));
     this.pushEnabled = options.pushEnabled === true;
+    this.pushBlockedEnabled = options.pushBlockedEnabled === true;
     const fetchTimeout = options.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
     if (!Number.isFinite(fetchTimeout) || fetchTimeout <= 0) throw new AutosError('INVALID_INPUT', 'fetchTimeoutMs must be a positive number');
     this.fetchTimeoutMs = fetchTimeout;
@@ -419,8 +423,8 @@ export class GitRunner implements GitRunnerPort {
     return { commit_sha: sha, candidate_digest: current.digest, paths: committedPaths };
   }
 
-  async push(workspace: GitWorkspace, commitSha: string, signal?: AbortSignal): Promise<GitPushResult> {
-    if (!this.pushEnabled) return { status: 'DISABLED', commit_sha: commitSha };
+  async push(workspace: GitWorkspace, commitSha: string, signal?: AbortSignal, options: { wip?: boolean } = {}): Promise<GitPushResult> {
+    if (!(options.wip ? this.pushBlockedEnabled : this.pushEnabled)) return { status: 'DISABLED', commit_sha: commitSha };
     if (!shaSchema.safeParse(commitSha).success) throw new AutosError('INVALID_INPUT', 'Invalid commit revision');
     try {
       const record = await this.verifyWorkspace(workspace, signal);

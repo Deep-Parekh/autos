@@ -41,6 +41,7 @@ bitbucket:
       allowed_paths: [src/**, pom.xml]                # paths the SWE role may change
       prohibited_paths: [src/main/resources/secrets/**]
   push_feature_branch: false                          # enable after reviewed READY_FOR_HUMAN runs; token then needs Write
+  push_blocked_attempts: false                        # push a blocked attempt's unreviewed work to the feature branch; retries continue from it
   create_pull_request: false
   # read_token_env: AUTOS_BITBUCKET_READ_TOKEN        # optional: enables similar-fix (precedent) lookup
 

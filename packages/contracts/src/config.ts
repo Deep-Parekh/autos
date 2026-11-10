@@ -230,7 +230,7 @@ const configObjectSchema = z.strictObject({
     username_env: envNameSchema, token_env: envNameSchema,
   }),
   confluence: z.strictObject({ site_url: siteUrlSchema, branch_map_page_id: z.string().regex(/^[0-9]+$/), read_only: z.literal(true), username_env: envNameSchema, token_env: envNameSchema }),
-  bitbucket: z.strictObject({ allowed_repositories: z.array(repositoryConfigSchema).min(1), push_feature_branch: z.boolean().default(false), create_pull_request: z.literal(false), read_token_env: envNameSchema.optional() }),
+  bitbucket: z.strictObject({ allowed_repositories: z.array(repositoryConfigSchema).min(1), push_feature_branch: z.boolean().default(false), /** Push the unreviewed work of a BLOCKED attempt (after its agent ran) to the feature branch, so humans can inspect it; retries continue from it. */ push_blocked_attempts: z.boolean().default(false), create_pull_request: z.literal(false), read_token_env: envNameSchema.optional() }),
   git: z.strictObject({ branch_template: z.literal('deep/{issueKey}'), no_rebase: z.literal(true), no_force_push: z.literal(true), refuse_existing_feature_branch: z.literal(true) }),
   providers: z.strictObject({ claude: binarySchema, codex: binarySchema, cursor: binarySchema }),
   /** Optional reusable named models (provider + model), referenced from tier entries as `name` or `name:effort`. */

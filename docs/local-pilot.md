@@ -150,6 +150,16 @@ When a provider hits its session or usage limit, the next provider in the role's
 
 Within one job, SWE containers reuse the same `/scratch`, so a fallback, repair round or resume does not recompile and repopulate `/scratch/m2` from zero. QA and the reviewer get their own empty scratch every time. The SWE scratch lives under `artifacts/.scratch/swe-<jobId>` and is deleted when the job ends, is cancelled or pruned, and when the supervisor starts.
 
+## Blocked attempts keep their work
+
+Off by default. With `bitbucket.push_blocked_attempts: true`, when an attempt is blocked after its agents ran (QA or review failed, checks kept failing, a provider gave up), Autos' own Git code commits what the SWE wrote to the feature branch (`deep/KEY`) as **unreviewed work**. The commit message says it never passed checks, QA and review. The job shows `wip_commit_sha` (and `autos run` / `autos retry` print it), and `summary.md` ends with where it went.
+
+- **Pushing:** the commit is pushed, so you can open `deep/KEY` in Bitbucket and read the diff. This is independent of `push_feature_branch`, which covers reviewed READY_FOR_HUMAN commits. Pushes are never forced: create-only the first time, fast-forward afterwards. If the push fails, the commit stays in the workspace and the retry still continues from it.
+- **Retrying:** `autos retry JOB_ID` continues from that commit instead of starting over from the base branch. The SWE is told that the earlier attempt's work is on the branch and why it was stopped. QA and the reviewer still judge the whole change against the original base. A retry whose attempt was blocked before any agent ran continues the same preserved work.
+- **Workspaces:** the blocked attempt's workspace is kept (`awaiting_retry` in `autos workspaces`) while it is the issue's latest attempt, because the retry continues from it. `autos close KEY --abandoned` releases it.
+- **Turning it off later:** a retry still continues from work preserved earlier, so the branch name stays usable.
+- **Nothing ready to merge:** a blocked attempt is never READY_FOR_HUMAN, and its commit is not a reviewed candidate. Only an attempt that passes checks, QA and review becomes ready.
+
 ## Model tiers: cheapest model and effort first
 
 By default each role runs one provider/model chain. To save cost, define **model tiers** (size classes such as `sm`, `med`, `lg`; the names are yours) and give a role a **ladder** of tiers, cheapest first. Autos starts each ticket as low as it can and moves up only when the work fails, so a renamed field or a syntax bug never uses Opus or GPT-6 Sol. The sample configs carry a commented example; the `provider`/`model`/`fallbacks` form keeps working, and you can mix forms per role.

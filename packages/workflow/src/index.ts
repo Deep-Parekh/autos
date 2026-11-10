@@ -51,8 +51,9 @@ class Semaphore {
 
 const TERMINAL_STATES: readonly JobState[] = ['PLANNED', 'READY_FOR_HUMAN', 'BLOCKED', 'CANCELLED'];
 const JOB_SELECT = "SELECT jobs.*, (SELECT resolution FROM issue_closures WHERE issue_closures.issue_key=jobs.issue_key) AS closed_as FROM jobs";
-interface PolicyJob { job_id: string; issue_key: string; state: JobState; dry_run: boolean; parent_job_id: string | null; updated_at: string; workspace_dir: string | null }
-interface PolicySnapshot { jobs: Map<string, PolicyJob>; active: Set<string>; latestReady: Map<string, string>; closures: Map<string, IssueResolution> }
+interface PolicyJob { job_id: string; issue_key: string; state: JobState; dry_run: boolean; parent_job_id: string | null; updated_at: string; workspace_dir: string | null; wip: boolean; continues_job_id: string | null }
+/** awaitingRetry: BLOCKED attempts with preserved work that the issue's next retry would continue from. */
+interface PolicySnapshot { jobs: Map<string, PolicyJob>; active: Set<string>; latestReady: Map<string, string>; closures: Map<string, IssueResolution>; awaitingRetry: Set<string> }
 function closureFromRow(row: Record<string, unknown>): IssueClosure {
   return issueClosureSchema.parse({ issue_key: String(row.issue_key), resolution: String(row.resolution), closed_at: String(row.closed_at), closed_by: String(row.closed_by),
     job_id: row.job_id ? String(row.job_id) : null, commit_sha: row.commit_sha ? String(row.commit_sha) : null, feature_branch: row.feature_branch ? String(row.feature_branch) : null });
@@ -103,6 +104,10 @@ export class SqliteJobStore {
     addColumn('not_before', 'TEXT');
     addColumn('auto_retry_count', 'INTEGER NOT NULL DEFAULT 0');
     addColumn('cancel_cause', 'TEXT');
+    // Preserved unreviewed work of a BLOCKED attempt, and the blocked attempt a retry continues from.
+    addColumn('wip_commit_sha', 'TEXT');
+    addColumn('wip_push_status', 'TEXT');
+    addColumn('continues_job_id', 'TEXT');
     this.db.exec(`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(5, '${nowIso()}')`);
     // Issue-level closure (operator decision after manual review). The operator note lives in evidence only.
     this.db.exec(`CREATE TABLE IF NOT EXISTS issue_closures (issue_key TEXT PRIMARY KEY, resolution TEXT NOT NULL, closed_at TEXT NOT NULL, closed_by TEXT NOT NULL,
@@ -253,16 +258,22 @@ export class SqliteJobStore {
   }
   /** Everything the workspace retention policy needs, read at one moment. */
   policySnapshot(): PolicySnapshot {
-    const rows = this.db.prepare('SELECT job_id,issue_key,state,dry_run,parent_job_id,updated_at,workspace_dir FROM jobs ORDER BY created_at,rowid').all() as Array<Record<string, unknown>>;
-    const jobs = new Map<string, PolicyJob>(); const active = new Set<string>(); const latestReady = new Map<string, string>(); const closures = new Map<string, IssueResolution>();
+    const rows = this.db.prepare('SELECT job_id,issue_key,state,dry_run,parent_job_id,updated_at,workspace_dir,wip_commit_sha,continues_job_id FROM jobs ORDER BY created_at,rowid').all() as Array<Record<string, unknown>>;
+    const jobs = new Map<string, PolicyJob>(); const active = new Set<string>(); const latestReady = new Map<string, string>(); const closures = new Map<string, IssueResolution>(); const latestAttempt = new Map<string, PolicyJob>();
     for (const r of rows) {
-      const job: PolicyJob = { job_id: String(r.job_id), issue_key: String(r.issue_key), state: String(r.state) as JobState, dry_run: Boolean(r.dry_run), parent_job_id: r.parent_job_id ? String(r.parent_job_id) : null, updated_at: String(r.updated_at), workspace_dir: r.workspace_dir ? String(r.workspace_dir) : null };
+      const job: PolicyJob = { job_id: String(r.job_id), issue_key: String(r.issue_key), state: String(r.state) as JobState, dry_run: Boolean(r.dry_run), parent_job_id: r.parent_job_id ? String(r.parent_job_id) : null, updated_at: String(r.updated_at), workspace_dir: r.workspace_dir ? String(r.workspace_dir) : null , wip: r.state === 'BLOCKED' && Boolean(r.wip_commit_sha), continues_job_id: r.continues_job_id ? String(r.continues_job_id) : null };
       jobs.set(job.job_id, job);
-      if (!TERMINAL_STATES.includes(job.state)) { active.add(job.job_id); if (job.parent_job_id) active.add(job.parent_job_id); }
+      if (!TERMINAL_STATES.includes(job.state)) { active.add(job.job_id); if (job.parent_job_id) active.add(job.parent_job_id); if (job.continues_job_id) active.add(job.continues_job_id); }
       if (job.state === 'READY_FOR_HUMAN' && !job.dry_run) latestReady.set(job.issue_key, job.job_id);
+      if (!job.dry_run) latestAttempt.set(job.issue_key, job);
+    }
+    const awaitingRetry = new Set<string>();
+    for (const latest of latestAttempt.values()) {
+      if (latest.wip) awaitingRetry.add(latest.job_id);
+      else if (latest.continues_job_id && TERMINAL_STATES.includes(latest.state) && latest.state !== 'READY_FOR_HUMAN' && jobs.get(latest.continues_job_id)?.wip) awaitingRetry.add(latest.continues_job_id);
     }
     for (const r of this.db.prepare('SELECT issue_key,resolution FROM issue_closures').all() as Array<{ issue_key: string; resolution: string }>) closures.set(r.issue_key, r.resolution as IssueResolution);
-    return { jobs, active, latestReady, closures };
+    return { jobs, active, latestReady, closures, awaitingRetry };
   }
   /** Forgets a removed workspace, only when it is still the recorded one. */
   clearWorkspaceDir(jobId: string, candidates: string[]): void {
@@ -353,8 +364,11 @@ export class SqliteJobStore {
     const valid = jobRecordSchema.parse(job) as Job; jobIdSchema.parse(previousJobId);
     return this.tx(() => {
       this.assertOpen(valid.issue_key);
-      const old = this.db.prepare("SELECT state,issue_key,dry_run,parent_job_id,revision FROM jobs WHERE job_id=?").get(previousJobId) as {state?:string;issue_key?:string;dry_run?:number;parent_job_id?:string|null;revision?:number} | undefined;
+      const old = this.db.prepare("SELECT state,issue_key,dry_run,parent_job_id,revision,wip_commit_sha,continues_job_id FROM jobs WHERE job_id=?").get(previousJobId) as {state?:string;issue_key?:string;dry_run?:number;parent_job_id?:string|null;revision?:number;wip_commit_sha?:string|null;continues_job_id?:string|null} | undefined;
       if (!old || !['BLOCKED','CANCELLED'].includes(old.state ?? '') || old.issue_key !== valid.issue_key || Number(old.dry_run) !== Number(valid.dry_run) || this.hasActive(valid.issue_key)) return false;
+      // A retry continues the newest preserved unreviewed work: the retried attempt's own, else what that attempt continued.
+      const continues = old.state === 'BLOCKED' && old.wip_commit_sha ? previousJobId : old.continues_job_id ?? undefined;
+      if ((valid.continues_job_id ?? undefined) !== continues) return false;
       if (old.parent_job_id) {
         // Retrying a revision continues from the same parent, which must still be the latest READY attempt.
         if (valid.parent_job_id !== old.parent_job_id || valid.revision !== Number(old.revision ?? 0) || this.latestReadyId(valid.issue_key) !== old.parent_job_id) return false;
@@ -367,8 +381,13 @@ export class SqliteJobStore {
       return true;
     });
   }
-  private insert(job: Job) { return this.db.prepare(`INSERT INTO jobs(job_id,issue_key,repository_id,base_sha,state,dry_run,repair_round,created_at,updated_at,blocked_code,blocked_reason,feature_branch,commit_sha,base_branch,parent_job_id,revision)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(job.job_id, job.issue_key, job.repository_id, job.base_sha, job.state, Number(job.dry_run), job.repair_round, job.created_at, job.updated_at, job.blocked_code ?? null, job.blocked_reason ?? null, job.feature_branch ?? null, job.commit_sha ?? null, job.base_branch ?? null, job.parent_job_id ?? null, job.revision ?? 0); }
+  private insert(job: Job) { return this.db.prepare(`INSERT INTO jobs(job_id,issue_key,repository_id,base_sha,state,dry_run,repair_round,created_at,updated_at,blocked_code,blocked_reason,feature_branch,commit_sha,base_branch,parent_job_id,revision,continues_job_id)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(job.job_id, job.issue_key, job.repository_id, job.base_sha, job.state, Number(job.dry_run), job.repair_round, job.created_at, job.updated_at, job.blocked_code ?? null, job.blocked_reason ?? null, job.feature_branch ?? null, job.commit_sha ?? null, job.base_branch ?? null, job.parent_job_id ?? null, job.revision ?? 0, job.continues_job_id ?? null); }
+  /** Records the commit preserving a BLOCKED attempt's unreviewed work (and whether it was pushed). */
+  setWip(jobId: string, commitSha: string, pushStatus: 'PUSHED' | 'FAILED' | 'DISABLED'): void {
+    jobIdSchema.parse(jobId); if (!/^[a-f0-9]{40}$/.test(commitSha)) throw new AutosError('INVALID_INPUT', 'Invalid commit revision');
+    this.db.prepare("UPDATE jobs SET wip_commit_sha=?, wip_push_status=? WHERE job_id=? AND state='BLOCKED'").run(commitSha, pushStatus, jobId);
+  }
   private hasActive(issueKey: string): boolean { return Boolean(this.db.prepare("SELECT 1 FROM jobs WHERE issue_key=? AND state IN ('QUEUED','INVESTIGATING','IMPLEMENTING','QA','REVIEW','REVISING','PAUSED','CANCELLING') LIMIT 1").get(issueKey)); }
   private assertNoActive(issueKey: string): void { if (this.hasActive(issueKey)) throw new AutosError('CONFLICT', 'Issue already has an active attempt'); }
   async get(jobId: string): Promise<Job | null> { jobIdSchema.parse(jobId); const row = this.db.prepare('SELECT jobs.*, (SELECT resolution FROM issue_closures WHERE issue_closures.issue_key=jobs.issue_key) AS closed_as FROM jobs WHERE job_id=?').get(jobId); return row ? fromRow(row as Record<string, unknown>) : null; }
@@ -607,6 +626,8 @@ function fromRow(row: Record<string, unknown>): Job {
     ...(row.blocked_code ? { blocked_code: String(row.blocked_code) as NonNullable<Job['blocked_code']> } : {}), ...(row.blocked_reason ? { blocked_reason: String(row.blocked_reason) } : {}),
     ...(row.feature_branch ? { feature_branch: String(row.feature_branch) } : {}), ...(row.commit_sha ? { commit_sha: String(row.commit_sha) } : {}), ...(row.base_branch ? { base_branch: String(row.base_branch) } : {}),
     ...(row.parent_job_id ? { parent_job_id: String(row.parent_job_id) } : {}), ...(Number(row.revision ?? 0) > 0 ? { revision: Number(row.revision) } : {}), ...(row.closed_as ? { closed_as: String(row.closed_as) } : {}),
+    ...(row.state === 'BLOCKED' && row.wip_commit_sha ? { wip_commit_sha: String(row.wip_commit_sha), ...(row.wip_push_status ? { wip_push_status: String(row.wip_push_status) } : {}) } : {}),
+    ...(row.continues_job_id ? { continues_job_id: String(row.continues_job_id) } : {}),
     ...(row.state === 'PAUSED' ? { ...(row.resume_at ? { resume_at: String(row.resume_at) } : {}), ...(row.pause_code ? { pause_code: String(row.pause_code) } : {}), ...(row.paused_role ? { paused_role: String(row.paused_role) } : {}),
       ...(row.paused_since ? { paused_since: String(row.paused_since) } : {}), ...(Number(row.pause_count ?? 0) > 0 ? { pause_count: Number(row.pause_count) } : {}) } : {}) }) as Job;
 }
@@ -737,6 +758,7 @@ function classifyWorkspace(snapshot: PolicySnapshot, jobId: string, job: PolicyJ
   const recorded = job !== null && job.workspace_dir !== null && recordedCandidates.includes(job.workspace_dir);
   let reason: 'superseded' | 'retention' | 'orphan';
   if (!job || !recorded) reason = 'orphan';
+  else if (snapshot.awaitingRetry.has(jobId)) return { removable: null, retained_because: 'awaiting_retry' };
   else if (job.state === 'READY_FOR_HUMAN') {
     if (snapshot.latestReady.get(job.issue_key) === job.job_id) return { removable: null, retained_because: 'awaiting_review' };
     reason = 'superseded';
@@ -775,6 +797,8 @@ export class WorkflowService implements WorkflowServicePort {
   private runnerDown = false;
   private readonly heartbeatMs: number;
   private readonly agentStarted = new Set<string>();
+  /** Running attempts' workspaces and starting candidate digest, so a BLOCKED attempt's unreviewed work can be preserved. */
+  private readonly liveWorkspaces = new Map<string, { workspace: GitWorkspace; startDigest: string }>();
   private readonly implementationText = new Map<string, string>();
   private readonly activeControllers = new Map<string, AbortController>();
   private readonly activeDone = new Map<string, Promise<void>>();
@@ -1020,10 +1044,12 @@ export class WorkflowService implements WorkflowServicePort {
   /** Shared by explicit retry (auto undefined: chain resets) and automatic requeues (auto carries the chain count, backoff and event text). */
   private async createRetryJob(old: Job, auto?: { count: number; notBefore?: string; message: string }): Promise<Job> {
     const id = this.options.id?.() ?? randomUUID(); const t = nowIso(this.deps.clock.now());
-    const job: Job = { job_id: id, issue_key: old.issue_key, repository_id: null, base_sha: null, state: 'QUEUED', dry_run: old.dry_run, repair_round: 0, created_at: t, updated_at: t, ...(old.parent_job_id ? { parent_job_id: old.parent_job_id, revision: old.revision ?? 1 } : {}) };
+    // Continue the newest preserved unreviewed work: the retried attempt's own, else what that attempt itself continued.
+    const continues = old.state === 'BLOCKED' && old.wip_commit_sha ? old.job_id : old.continues_job_id;
+    const job: Job = { job_id: id, issue_key: old.issue_key, repository_id: null, base_sha: null, state: 'QUEUED', dry_run: old.dry_run, repair_round: 0, created_at: t, updated_at: t, ...(old.parent_job_id ? { parent_job_id: old.parent_job_id, revision: old.revision ?? 1 } : {}), ...(continues ? { continues_job_id: continues } : {}) };
     const store = this.jobs as SqliteJobStore;
     if (!(await store.createRetry(job, old.job_id, auto ? { not_before: auto.notBefore ?? null, auto_retry_count: auto.count } : {}))) throw new AutosError('CONFLICT', 'Blocked attempt changed concurrently');
-    this.jobEvent(job, { type: 'job_queued', state: 'QUEUED', message: auto ? auto.message : old.parent_job_id ? 'Queued as retry of an earlier revision attempt' : 'Queued as retry of an earlier attempt' });
+    this.jobEvent(job, { type: 'job_queued', state: 'QUEUED', message: auto ? auto.message : continues ? 'Queued as retry continuing the unreviewed work of an earlier attempt' : old.parent_job_id ? 'Queued as retry of an earlier revision attempt' : 'Queued as retry of an earlier attempt' });
     await this.writeManifest(job); return job;
   }
   async get(jobId: string): Promise<Job | null> { return this.jobs.get(jobId); }
@@ -1207,9 +1233,10 @@ export class WorkflowService implements WorkflowServicePort {
             try { await this.createRetryJob(await this.require(jobId), { count: count + 1, notBefore, message: `Auto-retry ${count + 1}/${MAX_AUTO_RETRIES} after ${err.code}; not before ${notBefore}` }); } catch { /* another attempt exists; nothing to requeue */ }
           } else await this.block(current, new AutosError(err.code, `${err.message}; automatic retry limit reached`, { retryable: true }));
         } else await this.block(current, err);
+        if (!leaseLost) await this.preserveBlockedWork(jobId);
       }
     }
-    finally { finished = true; this.agentStarted.delete(jobId); this.openStages.delete(jobId); this.implementationText.delete(jobId); this.toolchains.delete(jobId); clearInterval(heartbeat); signal?.removeEventListener('abort', externalAbort); await this.jobs.release(jobId, this.owner); this.activeControllers.delete(jobId); this.resolveActiveDone.get(jobId)?.(); this.resolveActiveDone.delete(jobId); this.activeDone.delete(jobId); }
+    finally { finished = true; this.agentStarted.delete(jobId); this.liveWorkspaces.delete(jobId); this.openStages.delete(jobId); this.implementationText.delete(jobId); this.toolchains.delete(jobId); clearInterval(heartbeat); signal?.removeEventListener('abort', externalAbort); await this.jobs.release(jobId, this.owner); this.activeControllers.delete(jobId); this.resolveActiveDone.get(jobId)?.(); this.resolveActiveDone.delete(jobId); this.activeDone.delete(jobId); }
     return this.require(jobId);
   }
   private async executeClaimed(initial: Job, signal: AbortSignal | undefined, leaseIsValid: () => boolean, renewLease: () => Promise<boolean>): Promise<void> {
@@ -1239,6 +1266,12 @@ export class WorkflowService implements WorkflowServicePort {
       if (parent.repository_id !== repoId) throw new AutosError('MAPPING', 'Repository mapping changed since the parent attempt');
       if (parent.state !== 'READY_FOR_HUMAN' || !parent.commit_sha || !parent.base_sha || !parent.base_branch) throw new AutosError('CONFLICT', 'Parent attempt is no longer a ready candidate');
     }
+    // A retry of a blocked attempt continues that attempt's preserved, unreviewed commit on the feature branch.
+    const continued = job.continues_job_id ? await this.require(job.continues_job_id) : null;
+    if (continued) {
+      if (continued.repository_id !== repoId) throw new AutosError('MAPPING', 'Repository mapping changed since the continued attempt');
+      if (continued.state !== 'BLOCKED' || !continued.wip_commit_sha || !continued.base_sha || !continued.base_branch) throw new AutosError('CONFLICT', 'The continued attempt has no preserved work');
+    }
     const profile = this.deps.config.build_profiles[repo.build_profile];
     const resolved = resolveToolchain({ jdk: mapping.jdk ?? null, tomcat: mapping.tomcat ?? null }, profile ? { ...(profile.jdk ? { jdk: profile.jdk } : {}), ...(profile.tomcat ? { tomcat: profile.tomcat } : {}) } : undefined);
     if (!resolved.ok) throw new AutosError('MAPPING', resolved.reason);
@@ -1247,6 +1280,7 @@ export class WorkflowService implements WorkflowServicePort {
     await this.write('branch-map.json', JSON.stringify(mapping, null, 2), job);
     await this.write('toolchain.json', JSON.stringify({ schema_version: 1, jdk: toolchain?.jdk ?? null, tomcat: toolchain?.tomcat ?? null, source: { jdk: toolchain ? (mapping.jdk ? 'branch_map' : 'build_profile') : null, tomcat: toolchain?.tomcat ? (mapping.tomcat ? 'branch_map' : 'build_profile') : null } }, null, 2), job);
     if (notes.length || parent) await this.write('operator-notes.json', JSON.stringify({ schema_version: 1, job_id: job.job_id, issue_key: job.issue_key, notes }, null, 2), job);
+    if (continued) await this.write('continued.json', JSON.stringify({ schema_version: 1, continues_job_id: continued.job_id, continued_commit_sha: continued.wip_commit_sha, continued_blocked_code: continued.blocked_code ?? null }, null, 2), job);
     if (parent) await this.write('parent.json', JSON.stringify({ schema_version: 1, parent_job_id: parent.job_id, parent_commit_sha: parent.commit_sha, revision: job.revision ?? 1 }, null, 2), job);
     let precedents: string;
     if (resume) precedents = ''; // kept from the first run of this attempt
@@ -1267,7 +1301,11 @@ export class WorkflowService implements WorkflowServicePort {
     }
     enter('baseline');
     let continueFrom: GitContinuation | undefined;
-    if (parent && !resume) {
+    if (continued && !resume) {
+      const continuedDirectory = store.workspaceDir(continued.job_id);
+      if (!continuedDirectory) throw new AutosError('CONFLICT', 'The workspace of the continued attempt was removed');
+      continueFrom = { parent_job_id: continued.job_id, parent_directory: continuedDirectory, parent_commit_sha: continued.wip_commit_sha!, base_sha: continued.base_sha!, development_branch: continued.base_branch! };
+    } else if (parent && !resume) {
       const parentDirectory = store.workspaceDir(parent.job_id);
       if (!parentDirectory) throw new AutosError('CONFLICT', 'Parent workspace location is not recorded');
       continueFrom = { parent_job_id: parent.job_id, parent_directory: parentDirectory, parent_commit_sha: parent.commit_sha!, base_sha: parent.base_sha!, development_branch: parent.base_branch! };
@@ -1275,7 +1313,7 @@ export class WorkflowService implements WorkflowServicePort {
     let workspace: GitWorkspace;
     if (resume) {
       // Never fetch, merge or rebase on resume: the pinned base and the partial work stay exactly as they were.
-      workspace = await this.reopenWorkspace(job, repo, repoId, mapping, parent, resume, signal);
+      workspace = await this.reopenWorkspace(job, repo, repoId, mapping, parent, resume, signal, continued?.wip_commit_sha);
       await stage('IMPLEMENTING');
       await this.restoreImplementationText(job);
     } else {
@@ -1290,13 +1328,14 @@ export class WorkflowService implements WorkflowServicePort {
     if (!resume) await this.writeImplementation(job, `# Implementation\n\nBase: ${workspace.base_sha}\n\n${effectiveInstructionsText(instructionFiles, null, startSha, workspace.feature_branch)}\n`);
     const checkCommands = this.deps.config.build_profiles[repo.build_profile]?.checks; if (!checkCommands) throw new AutosError('INVALID_CONFIG', 'Repository build profile is missing');
     const baseline = await retryInfrastructure(() => this.deps.git.inspectCandidate(workspace, signal), signal);
+    this.liveWorkspaces.set(job.job_id, { workspace, startDigest: baseline.digest });
     if (resume) { /* baseline evidence was recorded before the pause */ }
-    else if (!parent) {
+    else if (!parent && !continued) {
       const baseChecks = await retryInfrastructure(() => this.runChecksObserved(job, workspace, baseline.digest, checkCommands, signal), signal);
       this.validateChecks(baseChecks, baseline.digest, checkCommands); await this.write('baseline-checks.json', JSON.stringify(baseChecks, null, 2), job); // evidence first, then the assertion
       this.assertChecks(baseChecks, baseline.digest, true, checkCommands);
     } else {
-      // Starting state of a revision is the reviewed parent commit; a failing baseline is recorded, not blocking.
+      // Starting state of a revision (reviewed parent commit) or a continuation (preserved unreviewed work); a failing baseline is recorded, not blocking.
       try {
         const baseChecks = await retryInfrastructure(() => this.runChecksObserved(job, workspace, baseline.digest, checkCommands, signal), signal);
         this.validateChecks(baseChecks, baseline.digest, checkCommands); await this.write('baseline-checks.json', JSON.stringify(baseChecks, null, 2), job);
@@ -1312,7 +1351,7 @@ export class WorkflowService implements WorkflowServicePort {
     const policy = pathPolicyText(repo);
     const instr = { files: instructionFiles, startSha, branch: workspace.feature_branch };
     const repairLimit = Math.min(2, this.deps.config.jobs.max_repair_rounds);
-    const prompt = this.prompt(job, 'swe', issue, { diff: baseline.diff, instr, paths: null, policy, task: (parent ? 'Apply the operator revision request below to the existing branch. Only edit source; do not commit or push.' : 'Implement the requested ticket. Only edit source; do not commit or push.') + SWE_RULES, trusted: sweNotes });
+    const prompt = this.prompt(job, 'swe', issue, { diff: baseline.diff, instr, paths: null, policy, task: (continued ? `Continue an earlier attempt of this ticket. Its unreviewed work is already on this branch (included in the diff above). That attempt was stopped: ${continued.blocked_code ?? 'BLOCKED'}${continued.blocked_reason ? ` (${continued.blocked_reason})` : ''}. Review that work against the ticket${parent ? ', the revision request' : ''} and the operator notes, finish it, and fix anything missing or wrong. Only edit source; do not commit or push.` : parent ? 'Apply the operator revision request below to the existing branch. Only edit source; do not commit or push.' : 'Implement the requested ticket. Only edit source; do not commit or push.') + SWE_RULES, trusted: sweNotes });
     let repairs = resume ? resume.repair_round : 0; const rounds: Array<Record<string, unknown>> = resume ? resume.rounds.map((r) => ({ ...r })) : [];
     const flushRounds = async () => this.write('rounds.json', JSON.stringify({ schema_version: 1, job_id: job.job_id, issue_key: job.issue_key, base_sha: workspace.base_sha, rounds: rounds.map((r) => Array.isArray(r.provider_attempts) ? { ...r, provider_attempts: r.provider_attempts.map((a) => providerAttemptSchema.parse(a)) } : r) }, null, 2), job);
     // A successful SWE attempt that left no change (relative to what it started from) is INVALID_OUTPUT so the chain falls back.
@@ -1799,11 +1838,11 @@ export class WorkflowService implements WorkflowServicePort {
     throw new PausedSignal();
   }
   /** Re-adopts the paused attempt's workspace through trusted Git (sealed at pause time); never moves the base. */
-  private async reopenWorkspace(job: Job, repo: RepositoryConfig, repoId: string, mapping: Parameters<WorkflowDependencies['git']['prepare']>[0]['mapping'], parent: Job | null, checkpoint: PauseCheckpoint, signal?: AbortSignal): Promise<GitWorkspace> {
+  private async reopenWorkspace(job: Job, repo: RepositoryConfig, repoId: string, mapping: Parameters<WorkflowDependencies['git']['prepare']>[0]['mapping'], parent: Job | null, checkpoint: PauseCheckpoint, signal?: AbortSignal, startOverride?: string): Promise<GitWorkspace> {
     const directory = (this.jobs as SqliteJobStore).workspaceDir(job.job_id);
     if (job.repository_id !== repoId) throw new AutosError('MAPPING', 'Repository mapping changed while the attempt was paused');
     if (!directory || !job.base_sha || !job.base_branch || !job.feature_branch || !checkpoint.workspace_seal || !this.deps.git.reopen) throw new AutosError('CONFLICT', 'Paused attempt has no resumable workspace');
-    const workspace: GitWorkspace = { job_id: job.job_id, issue_key: job.issue_key, repository: repo, directory, base_sha: job.base_sha, development_branch: job.base_branch, feature_branch: job.feature_branch, start_sha: parent?.commit_sha ?? job.base_sha };
+    const workspace: GitWorkspace = { job_id: job.job_id, issue_key: job.issue_key, repository: repo, directory, base_sha: job.base_sha, development_branch: job.base_branch, feature_branch: job.feature_branch, start_sha: startOverride ?? parent?.commit_sha ?? job.base_sha };
     return this.deps.git.reopen({ workspace, mapping, workspaces_root: this.deps.config.storage.workspaces_dir, seal: checkpoint.workspace_seal }, signal);
   }
   private async restoreImplementationText(job: Job): Promise<void> {
@@ -1875,6 +1914,44 @@ export class WorkflowService implements WorkflowServicePort {
   }
   private async write(name: string, content: string, job: Job): Promise<void> { await this.deps.artifacts.write(job.job_id, name, content); await this.updateManifest(job); }
   private async writeImplementation(job: Job, content: string): Promise<void> { this.implementationText.set(job.job_id, content); await this.write('implementation.md', content, job); }
+  /**
+   * With bitbucket.push_blocked_attempts, after an attempt is BLOCKED once its agents ran: trusted Git commits the
+   * attempt's unreviewed work on the feature branch (never reviewed, never READY_FOR_HUMAN) and pushes it, so humans can
+   * inspect it and an explicit retry continues from it. Best effort: failures are recorded in summary.md only.
+   */
+  private async preserveBlockedWork(jobId: string): Promise<void> {
+    // Opt-in (bitbucket.push_blocked_attempts): by default a blocked attempt never produces a commit.
+    const live = this.liveWorkspaces.get(jobId);
+    if (!this.deps.config.bitbucket.push_blocked_attempts || !live || !this.agentStarted.has(jobId)) return;
+    let job: Job;
+    try { job = await this.require(jobId); } catch { return; }
+    if (job.state !== 'BLOCKED' || job.dry_run) return;
+    const signal = AbortSignal.timeout(120_000); const { workspace } = live;
+    let line: string;
+    try {
+      const candidate = await this.deps.git.inspectCandidate(workspace, signal);
+      const changed = candidate.incremental ? candidate.incremental.paths.length > 0 : candidate.paths.length > 0;
+      if (!changed || candidate.digest === live.startDigest) line = 'The agents left no new changes to preserve.';
+      else {
+        const commit = await this.deps.git.commit({ workspace, candidate_digest: candidate.digest, approved_paths: candidate.paths,
+          message: `${job.issue_key}: unreviewed work from a blocked attempt (${job.blocked_code ?? 'BLOCKED'})\n\nAutos attempt ${job.job_id} stopped before passing checks, QA and review. Not ready to merge; an explicit retry continues from this commit.`,
+          author: { name: 'Autos', email: 'autos@localhost' } }, signal);
+        let pushed: 'PUSHED' | 'FAILED' | 'DISABLED';
+        try { pushed = (await this.deps.git.push(workspace, commit.commit_sha, signal, { wip: true })).status; } catch { pushed = 'FAILED'; }
+        (this.jobs as SqliteJobStore).setWip(jobId, commit.commit_sha, pushed);
+        const where = pushed === 'PUSHED' ? 'pushed' : pushed === 'DISABLED' ? 'not pushed: the Git runner has pushing blocked work disabled' : 'push failed; the commit is kept in the workspace';
+        line = `Unreviewed work preserved as commit ${commit.commit_sha.slice(0, 12)} on ${workspace.feature_branch} (${where}). An explicit retry (autos retry ${jobId}) continues from it.`;
+      }
+    } catch (error) { line = `Unreviewed work could not be preserved (${safeError(error).code}).`; }
+    await this.appendSummary(job, line).catch(() => undefined);
+    await this.writeManifest(await this.require(jobId)).catch(() => undefined);
+  }
+  private async appendSummary(job: Job, line: string): Promise<void> {
+    const artifacts = this.deps.artifacts as FileArtifactStore;
+    let prior = `# ${job.issue_key}\n\nBlocked (${job.blocked_code ?? 'BLOCKED'}): ${job.blocked_reason ?? ''}\n`;
+    if (typeof artifacts.root === 'string') { try { prior = await readFile(join(artifacts.root, job.job_id, 'summary.md'), 'utf8'); } catch { /* use the fallback */ } }
+    await this.write('summary.md', `${prior.trimEnd()}\n\n${line}\n`, job);
+  }
   private async writeSummary(job: Job, message: string): Promise<void> { await this.write('summary.md', `# ${job.issue_key}\n\n${message}\n`, job); }
   private async appendImplementationNotes(job: Job, result: ProviderResult, round: number): Promise<void> {
     const notes = implementationNotes(result.result);

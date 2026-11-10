@@ -28,6 +28,7 @@ bitbucket:
       allowed_paths: [src/**, pom.xml]
       prohibited_paths: [src/main/resources/secrets/**]
   push_feature_branch: false
+  push_blocked_attempts: false                        # push a blocked attempt's unreviewed work to the feature branch; retries continue from it
   create_pull_request: false
 git:
   branch_template: deep/{issueKey}

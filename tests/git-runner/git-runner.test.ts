@@ -168,6 +168,17 @@ describe('GitRunner', () => {
     assert.equal((await git(bare, ['show-ref', '--verify', 'refs/heads/development'])).split(' ')[0], await git(seed, ['rev-parse', 'development']));
   });
 
+  it('pushes blocked-attempt work only with pushBlockedEnabled, independent of pushEnabled', async () => {
+    const wipRunner = new GitRunner({ allowedRepositories: [repository], pushBlockedEnabled: true, testOnlyRemoteOverrides: [{ repository: 'demo/fixture', path: bare }] });
+    const workspace = await prepare(wipRunner);
+    await writeFile(join(workspace.directory, 'src', 'app.txt'), 'unreviewed\n');
+    const wip = await wipRunner.commit({ workspace, candidate_digest: (await wipRunner.inspectCandidate(workspace)).digest, approved_paths: ['src/app.txt'], message: 'WIP', author: { name: 'Autos', email: 'autos@example.test' } });
+    assert.deepEqual(await wipRunner.push(workspace, wip.commit_sha), { status: 'DISABLED', commit_sha: wip.commit_sha }, 'reviewed pushes stay off');
+    assert.deepEqual(await wipRunner.push(workspace, wip.commit_sha, undefined, { wip: true }), { status: 'PUSHED', commit_sha: wip.commit_sha });
+    assert.equal(await git(bare, ['rev-parse', 'refs/heads/deep/DEMO-42']), wip.commit_sha);
+    assert.deepEqual(await runner.push(workspace, wip.commit_sha, undefined, { wip: true }), { status: 'DISABLED', commit_sha: wip.commit_sha }, 'off by default');
+  });
+
   it('reports push failures without losing the local commit and handles cancellation', async () => {
     const pushingRunner = new GitRunner({ allowedRepositories: [repository], pushEnabled: true, testOnlyRemoteOverrides: [{ repository: 'demo/fixture', path: bare }] });
     const workspace = await prepare(pushingRunner);

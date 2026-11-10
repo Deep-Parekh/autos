@@ -704,6 +704,20 @@ paths:
                             - MERGED
                             - ABANDONED
                           description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                        wip_commit_sha:
+                          type: string
+                          description: "BLOCKED only: commit on the feature branch that preserves the attempt's unreviewed work. Not reviewed and not ready to merge; an explicit retry continues from it."
+                        wip_push_status:
+                          type: string
+                          enum:
+                            - PUSHED
+                            - FAILED
+                            - DISABLED
+                          description: "BLOCKED only: whether that commit was pushed (bitbucket.push_blocked_attempts)."
+                        continues_job_id:
+                          type: string
+                          format: uuid
+                          description: Set on a retry that continues an earlier blocked attempt's unreviewed work.
                         resume_at:
                           type: string
                           format: date-time
@@ -1094,6 +1108,20 @@ paths:
                             - MERGED
                             - ABANDONED
                           description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                        wip_commit_sha:
+                          type: string
+                          description: "BLOCKED only: commit on the feature branch that preserves the attempt's unreviewed work. Not reviewed and not ready to merge; an explicit retry continues from it."
+                        wip_push_status:
+                          type: string
+                          enum:
+                            - PUSHED
+                            - FAILED
+                            - DISABLED
+                          description: "BLOCKED only: whether that commit was pushed (bitbucket.push_blocked_attempts)."
+                        continues_job_id:
+                          type: string
+                          format: uuid
+                          description: Set on a retry that continues an earlier blocked attempt's unreviewed work.
                         resume_at:
                           type: string
                           format: date-time
@@ -1511,6 +1539,20 @@ paths:
                       - MERGED
                       - ABANDONED
                     description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  wip_commit_sha:
+                    type: string
+                    description: "BLOCKED only: commit on the feature branch that preserves the attempt's unreviewed work. Not reviewed and not ready to merge; an explicit retry continues from it."
+                  wip_push_status:
+                    type: string
+                    enum:
+                      - PUSHED
+                      - FAILED
+                      - DISABLED
+                    description: "BLOCKED only: whether that commit was pushed (bitbucket.push_blocked_attempts)."
+                  continues_job_id:
+                    type: string
+                    format: uuid
+                    description: Set on a retry that continues an earlier blocked attempt's unreviewed work.
                   resume_at:
                     type: string
                     format: date-time
@@ -2223,6 +2265,20 @@ paths:
                       - MERGED
                       - ABANDONED
                     description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  wip_commit_sha:
+                    type: string
+                    description: "BLOCKED only: commit on the feature branch that preserves the attempt's unreviewed work. Not reviewed and not ready to merge; an explicit retry continues from it."
+                  wip_push_status:
+                    type: string
+                    enum:
+                      - PUSHED
+                      - FAILED
+                      - DISABLED
+                    description: "BLOCKED only: whether that commit was pushed (bitbucket.push_blocked_attempts)."
+                  continues_job_id:
+                    type: string
+                    format: uuid
+                    description: Set on a retry that continues an earlier blocked attempt's unreviewed work.
                   resume_at:
                     type: string
                     format: date-time
@@ -2645,6 +2701,20 @@ paths:
                       - MERGED
                       - ABANDONED
                     description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  wip_commit_sha:
+                    type: string
+                    description: "BLOCKED only: commit on the feature branch that preserves the attempt's unreviewed work. Not reviewed and not ready to merge; an explicit retry continues from it."
+                  wip_push_status:
+                    type: string
+                    enum:
+                      - PUSHED
+                      - FAILED
+                      - DISABLED
+                    description: "BLOCKED only: whether that commit was pushed (bitbucket.push_blocked_attempts)."
+                  continues_job_id:
+                    type: string
+                    format: uuid
+                    description: Set on a retry that continues an earlier blocked attempt's unreviewed work.
                   resume_at:
                     type: string
                     format: date-time
@@ -3066,6 +3136,7 @@ paths:
                           enum:
                             - active
                             - awaiting_review
+                            - awaiting_retry
                             - within_retention
                             - null
                       required:
@@ -3498,6 +3569,20 @@ paths:
                             - MERGED
                             - ABANDONED
                           description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                        wip_commit_sha:
+                          type: string
+                          description: "BLOCKED only: commit on the feature branch that preserves the attempt's unreviewed work. Not reviewed and not ready to merge; an explicit retry continues from it."
+                        wip_push_status:
+                          type: string
+                          enum:
+                            - PUSHED
+                            - FAILED
+                            - DISABLED
+                          description: "BLOCKED only: whether that commit was pushed (bitbucket.push_blocked_attempts)."
+                        continues_job_id:
+                          type: string
+                          format: uuid
+                          description: Set on a retry that continues an earlier blocked attempt's unreviewed work.
                         resume_at:
                           type: string
                           format: date-time
@@ -6859,6 +6944,7 @@ paths:
                           enum:
                             - active
                             - awaiting_review
+                            - awaiting_retry
                             - within_retention
                             - null
                       required:
@@ -7189,6 +7275,7 @@ paths:
                           enum:
                             - active
                             - awaiting_review
+                            - awaiting_retry
                             - within_retention
                             - null
                       required:
@@ -7563,6 +7650,20 @@ paths:
                       - MERGED
                       - ABANDONED
                     description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  wip_commit_sha:
+                    type: string
+                    description: "BLOCKED only: commit on the feature branch that preserves the attempt's unreviewed work. Not reviewed and not ready to merge; an explicit retry continues from it."
+                  wip_push_status:
+                    type: string
+                    enum:
+                      - PUSHED
+                      - FAILED
+                      - DISABLED
+                    description: "BLOCKED only: whether that commit was pushed (bitbucket.push_blocked_attempts)."
+                  continues_job_id:
+                    type: string
+                    format: uuid
+                    description: Set on a retry that continues an earlier blocked attempt's unreviewed work.
                   resume_at:
                     type: string
                     format: date-time
@@ -8206,6 +8307,20 @@ paths:
                       - MERGED
                       - ABANDONED
                     description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  wip_commit_sha:
+                    type: string
+                    description: "BLOCKED only: commit on the feature branch that preserves the attempt's unreviewed work. Not reviewed and not ready to merge; an explicit retry continues from it."
+                  wip_push_status:
+                    type: string
+                    enum:
+                      - PUSHED
+                      - FAILED
+                      - DISABLED
+                    description: "BLOCKED only: whether that commit was pushed (bitbucket.push_blocked_attempts)."
+                  continues_job_id:
+                    type: string
+                    format: uuid
+                    description: Set on a retry that continues an earlier blocked attempt's unreviewed work.
                   resume_at:
                     type: string
                     format: date-time

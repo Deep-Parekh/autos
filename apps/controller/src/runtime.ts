@@ -104,7 +104,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Contr
     ...(env.AUTOS_GIT_ASKPASS_PATH ? { gitAskPassPath: env.AUTOS_GIT_ASKPASS_PATH } : {}),
     ...(env.SSH_AUTH_SOCK ? { sshAuthSocket: env.SSH_AUTH_SOCK } : {}),
   };
-  const git = options.git ?? new GitRunner({ allowedRepositories: config.bitbucket.allowed_repositories, pushEnabled: config.bitbucket.push_feature_branch, trustedCredentials });
+  const git = options.git ?? new GitRunner({ allowedRepositories: config.bitbucket.allowed_repositories, pushEnabled: config.bitbucket.push_feature_branch, pushBlockedEnabled: config.bitbucket.push_blocked_attempts, trustedCredentials });
   const jobs = new SqliteJobStore(join(config.storage.data_dir, 'autos.sqlite'));
   const artifacts = new FileArtifactStore(config.storage.artifacts_dir);
   const service = createWorkflowService({ config, atlassian, precedents, git, runner, jobs, artifacts, clock: options.clock ?? { now: () => new Date() } });
