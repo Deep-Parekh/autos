@@ -1,0 +1,65 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "1.0.0",
+  "id": "{{APP_ID}}",
+  "developer": {
+    "name": "Autos",
+    "websiteUrl": "https://learn.microsoft.com/microsoftteams/platform/",
+    "privacyUrl": "https://learn.microsoft.com/microsoftteams/platform/",
+    "termsOfUseUrl": "https://learn.microsoft.com/microsoftteams/platform/"
+  },
+  "name": {
+    "short": "Autos",
+    "full": "Autos engineering workflow assistant"
+  },
+  "description": {
+    "short": "Run and review Autos engineering jobs.",
+    "full": "Talk to Autos from Teams to start Jira work, inspect job status, and review results."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#4F46E5",
+  "bots": [
+    {
+      "botId": "{{APP_ID}}",
+      "scopes": [
+        "personal",
+        "team",
+        "groupChat"
+      ],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": [
+            "personal",
+            "team",
+            "groupChat"
+          ],
+          "commands": [
+            {
+              "title": "help",
+              "description": "Show Autos Teams commands"
+            },
+            {
+              "title": "run",
+              "description": "Start a Jira job or open the run form"
+            },
+            {
+              "title": "status",
+              "description": "Show controller and active job status"
+            },
+            {
+              "title": "show",
+              "description": "Show a Jira issue's latest job"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "validDomains": []
+}

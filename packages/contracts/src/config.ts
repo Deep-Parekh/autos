@@ -227,7 +227,7 @@ const teamsBotSchema = z.strictObject({
   /** Entra object IDs of the Teams users who may command Autos. Everyone else is refused. */
   allowed_users: z.array(entraIdSchema).min(1).max(100),
   /** Longest note or instruction text accepted from Teams. */
-  max_note_chars: z.number().int().min(100).max(20_000).default(4000),
+  max_note_chars: z.number().int().min(100).max(4000).default(4000), // the controller accepts at most 4000 per note
 });
 
 const configObjectSchema = z.strictObject({

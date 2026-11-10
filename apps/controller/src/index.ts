@@ -845,6 +845,16 @@ export async function createController(options: ControllerOptions): Promise<Fast
     return safeJob(await options.workflow.cancel(jobId));
   });
 
+  app.post('/v1/jobs/:jobId/retry', { schema: { tags: ['operator'], summary: 'Retry one blocked or cancelled job', description: 'Starts an explicit new attempt for a BLOCKED or CANCELLED job (workflow retry). The new attempt is queued and run as a slot frees up. 409 when the job cannot be retried (not finished, closed issue, or a newer attempt exists).', operationId: 'retryJob', security: [{ bearerAuth: [] }], headers: actorHeaders, params: { type: 'object', properties: { jobId: { type: 'string', format: 'uuid' } }, required: ['jobId'] }, response: { 202: jobSchema, 404: errorSchema, 409: errorSchema } } }, async (request, reply) => {
+    const { jobId } = request.params as { jobId: string };
+    const job = await options.workflow.get(jobId);
+    if (!job) return reply.code(404).send({ code: 'NOT_FOUND', message: 'Job not found', request_id: request.id });
+    const next = await options.workflow.retry(jobId);
+    audit(request, 'job_retry', { job_id: jobId, new_job_id: next.job_id, issue_key: next.issue_key });
+    if (next.state === 'QUEUED') launch(next.job_id);
+    return reply.code(202).send(safeJob(next));
+  });
+
   const startedAtMs = Date.now();
   const heartbeatMs = options.sseHeartbeatMs ?? 15_000;
   const healthTimeoutMs = options.runnerHealthTimeoutMs ?? 2000;

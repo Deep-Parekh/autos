@@ -110,6 +110,12 @@ api:
   operator_token_env: AUTOS_OPERATOR_TOKEN
 
 # Optional Teams notifications (`autos teams relay`, docs/teams.md). The webhook URL is a secret: put it in .env.
+# Two-way Teams bot (`autos teams bot`, docs/teams-bot.md):
+# teams_bot:
+#   app_id: 00000000-0000-0000-0000-000000000000      # Azure Bot Microsoft App ID (Entra application ID)
+#   tenant_id: 00000000-0000-0000-0000-000000000000
+#   client_secret_env: AUTOS_TEAMS_BOT_SECRET
+#   allowed_users: [00000000-0000-0000-0000-000000000000]   # Entra object IDs of people who may command Autos
 # notifications:
 #   teams:
 #     webhook_url_env: AUTOS_TEAMS_WEBHOOK_URL

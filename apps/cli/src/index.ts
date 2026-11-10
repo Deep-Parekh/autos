@@ -9,6 +9,10 @@ import type { OperatorNoteRequest, WorkflowServicePort } from '@autos/contracts'
 import type { ControllerOptions, LoopStatus, ProviderDiagnostic, StatusResponse } from '@autos/controller';
 import { pollDelayMs, runControllerLoop, waitForSignalOrTimeout, type LoopSleep } from './loop.js';
 import { deepChecks, formatChecks, type CheckResult, type DeepDoctorDeps } from './deep-doctor.js';
+import { createControllerClient } from './teams-bot/actions.js';
+import { createBotAuthenticator } from './teams-bot/auth.js';
+import { ConnectorClient } from './teams-bot/connector.js';
+import { createBotServer } from './teams-bot/server.js';
 import { buildLifecycleMessage, buildTeamsMessage, cursorPath, EntraTokenSource, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, readRelayState, TierTracker, writeRelayState, type FetchLike, type LifecycleFacts } from './teams.js';
 
 export interface CliRuntime extends Omit<ControllerOptions, 'operatorToken' | 'fastifyOptions' | 'bindHost'> {
@@ -40,6 +44,8 @@ export interface CliDependencies {
   /** Test seams for `autos teams`: the webhook HTTP client and the delivery retry base delay. */
   teamsFetch?: FetchLike;
   teamsRetryDelayMs?: number;
+  /** Test seam for `autos teams bot`: the controller HTTP client (default global fetch). */
+  botControllerFetch?: FetchLike;
   /** How long the controller must stay unreachable before the relay posts an AUTOS_DOWN card (default 15 s). */
   teamsDownAfterMs?: number;
 }
@@ -107,6 +113,7 @@ Commands:
   teams relay [--from-start] [--url URL]  Post READY/BLOCKED/PAUSED and Autos up/down cards to Teams (notifications.teams;
                                   needs running controller; resumes after the last posted event; Ctrl-C to stop)
   teams test                      Post one test card to the configured Teams webhook
+  teams bot [--url URL]           Serve the two-way Teams bot endpoint on loopback (teams_bot; see docs/teams-bot.md)
   events [--job JOB_ID] [--after N] [--limit N] [--url URL]  List persisted progress events
   controller start                Run the local API and polling loop
   docs validate                   Check generated OpenAPI against docs/openapi.yaml
@@ -501,8 +508,49 @@ function requireEnv(env: Record<string, string | undefined>, name: string): stri
   if (!value) throw new AutosError('INVALID_CONFIG', `Environment variable ${name} must be set`);
   return value;
 }
+const teamsBotUsage = 'Usage: autos teams bot [--url URL]';
+/**
+ * Two-way Teams (phase 2): serves the bot's messaging endpoint on loopback and turns allowed users' commands into
+ * controller API calls. A tunnel or reverse proxy exposes only POST /api/messages (see docs/teams-bot.md).
+ */
+async function teamsBotCommand(args: string[], config: AutosConfig, dependencies: CliDependencies, stdout: (text: string) => void, stderr: (text: string) => void): Promise<number> {
+  const bot = config.teams_bot;
+  if (!bot) throw new AutosError('INVALID_CONFIG', 'teams_bot is not configured (see docs/teams-bot.md)');
+  const { values } = parseFlags(args, { bool: [], value: ['--url'] }, teamsBotUsage);
+  const env = dependencies.env ?? process.env;
+  const token = operatorToken(config, dependencies); const base = controllerBase(config, values.get('--url'));
+  const fetchImpl = dependencies.teamsFetch;
+  const tokens = new EntraTokenSource({ tenantId: bot.tenant_id, clientId: bot.app_id, clientSecret: requireEnv(env, bot.client_secret_env), cloud: 'public', scope: 'https://api.botframework.com/.default', ...(fetchImpl ? { fetch: fetchImpl } : {}), ...(dependencies.now ? { now: dependencies.now } : {}) });
+  const log = (record: Record<string, unknown>) => stderr(JSON.stringify(record));
+  // Fail fast on a wrong app ID, tenant or secret instead of silently failing every reply later.
+  await tokens.token();
+  const { server, idle } = createBotServer({
+    tenantId: bot.tenant_id, allowedUsers: bot.allowed_users,
+    parse: { allowedProjects: config.jira.allowed_projects, jiraSiteUrl: config.jira.site_url, maxNoteChars: bot.max_note_chars },
+    auth: createBotAuthenticator({ appId: bot.app_id, tenantId: bot.tenant_id, ...(fetchImpl ? { fetch: fetchImpl } : {}), ...(dependencies.now ? { now: dependencies.now } : {}) }),
+    connector: new ConnectorClient({ tokens, ...(fetchImpl ? { fetch: fetchImpl } : {}), ...(dependencies.teamsRetryDelayMs !== undefined ? { retryDelayMs: dependencies.teamsRetryDelayMs } : {}) }),
+    controller: createControllerClient(base, token, dependencies.botControllerFetch),
+    log,
+  });
+  const abort = new AbortController(); const stop = () => abort.abort(); const external = dependencies.signal;
+  if (external) { if (external.aborted) abort.abort(); else external.addEventListener('abort', stop, { once: true }); }
+  else { process.once('SIGINT', stop); process.once('SIGTERM', stop); }
+  try {
+    await new Promise<void>((resolveListen, rejectListen) => { server.once('error', rejectListen); server.listen(bot.port, bot.listen_host, () => resolveListen()); });
+    const address = server.address(); const port = typeof address === 'object' && address ? address.port : bot.port;
+    dependencies.onListening?.({ host: bot.listen_host, port });
+    log({ event: 'teams_bot_started', host: bot.listen_host, port, allowed_users: bot.allowed_users.length });
+    stdout(`Autos Teams bot listening on ${bot.listen_host}:${port} (POST /api/messages); Ctrl-C to stop`);
+    await new Promise<void>((resolveStop) => { if (abort.signal.aborted) resolveStop(); else abort.signal.addEventListener('abort', () => resolveStop(), { once: true }); });
+    await new Promise<void>((resolveClose) => { server.close(() => resolveClose()); server.closeAllConnections(); });
+    await idle();
+    log({ event: 'teams_bot_stopped' });
+    return 0;
+  } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); external?.removeEventListener('abort', stop); }
+}
 const teamsUsage = 'Usage: autos teams relay [--from-start] [--url URL] | autos teams test';
 async function teamsCommand(args: string[], config: AutosConfig, json: boolean, dependencies: CliDependencies, stdout: (text: string) => void, stderr: (text: string) => void): Promise<number> {
+  if (args[0] === 'bot') return teamsBotCommand(args.slice(1), config, dependencies, stdout, stderr);
   const teams = config.notifications?.teams;
   if (!teams) throw new AutosError('INVALID_CONFIG', 'notifications.teams is not configured (see docs/teams.md)');
   const env = dependencies.env ?? process.env;

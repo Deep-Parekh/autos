@@ -8454,6 +8454,380 @@ paths:
                 code: NOT_FOUND
                 message: Resource not found
                 request_id: 00000000-0000-4000-8000-000000000002
+  /v1/jobs/{jobId}/retry:
+    post:
+      operationId: retryJob
+      summary: Retry one blocked or cancelled job
+      tags:
+        - operator
+      description: Starts an explicit new attempt for a BLOCKED or CANCELLED job (workflow retry). The new attempt is queued and run as a slot frees up. 409 when the job cannot be retried (not finished, closed issue, or a newer attempt exists).
+      parameters:
+        - schema:
+            type: string
+            format: uuid
+          in: path
+          name: jobId
+          required: true
+        - schema:
+            type: string
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+          in: header
+          name: x-autos-operator
+          required: false
+          description: Optional audit label (not authentication). Defaults to operator.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  job_id:
+                    type: string
+                    format: uuid
+                  issue_key:
+                    type: string
+                    pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                  repository_id:
+                    type:
+                      - string
+                      - "null"
+                  base_sha:
+                    type:
+                      - string
+                      - "null"
+                  base_branch:
+                    type: string
+                  state:
+                    type: string
+                    enum:
+                      - QUEUED
+                      - INVESTIGATING
+                      - PLANNED
+                      - IMPLEMENTING
+                      - QA
+                      - REVIEW
+                      - REVISING
+                      - PAUSED
+                      - READY_FOR_HUMAN
+                      - BLOCKED
+                      - CANCELLING
+                      - CANCELLED
+                  dry_run:
+                    type: boolean
+                  repair_round:
+                    type: integer
+                    minimum: 0
+                    maximum: 2
+                  created_at:
+                    type: string
+                    format: date-time
+                  updated_at:
+                    type: string
+                    format: date-time
+                  blocked_code:
+                    type: string
+                    enum:
+                      - INVALID_CONFIG
+                      - INVALID_INPUT
+                      - AUTH
+                      - FORBIDDEN
+                      - NOT_FOUND
+                      - RATE_LIMIT
+                      - UPSTREAM
+                      - MAPPING
+                      - BRANCH_COLLISION
+                      - POLICY
+                      - TIMEOUT
+                      - CANCELLED
+                      - CONTEXT
+                      - TOOL
+                      - INVALID_OUTPUT
+                      - STALE_CANDIDATE
+                      - CHECK_FAILED
+                      - CONFLICT
+                      - INTERNAL
+                      - UNAVAILABLE
+                  blocked_reason:
+                    type: string
+                  feature_branch:
+                    type: string
+                  commit_sha:
+                    type: string
+                  push_status:
+                    type: string
+                    enum:
+                      - DISABLED
+                      - NOT_ATTEMPTED
+                      - PUSHED
+                      - FAILED
+                  parent_job_id:
+                    type: string
+                    format: uuid
+                    description: "Set on revision jobs: the READY_FOR_HUMAN job whose commit this attempt continues."
+                  revision:
+                    type: integer
+                    minimum: 0
+                    maximum: 20
+                    description: 0 for an initial attempt, n for the n-th requested revision of the same issue.
+                  closed_as:
+                    type: string
+                    enum:
+                      - MERGED
+                      - ABANDONED
+                    description: Set on every attempt of an issue the operator closed (MERGED or ABANDONED).
+                  resume_at:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: when the attempt is due to resume (provider-reported limit reset or backoff)."
+                  pause_code:
+                    type: string
+                    enum:
+                      - INVALID_CONFIG
+                      - INVALID_INPUT
+                      - AUTH
+                      - FORBIDDEN
+                      - NOT_FOUND
+                      - RATE_LIMIT
+                      - UPSTREAM
+                      - MAPPING
+                      - BRANCH_COLLISION
+                      - POLICY
+                      - TIMEOUT
+                      - CANCELLED
+                      - CONTEXT
+                      - TOOL
+                      - INVALID_OUTPUT
+                      - STALE_CANDIDATE
+                      - CHECK_FAILED
+                      - CONFLICT
+                      - INTERNAL
+                      - UNAVAILABLE
+                    description: "PAUSED only: RATE_LIMIT for a limited provider chain, or the infrastructure code when a resuming attempt failed before any agent ran."
+                  paused_role:
+                    type: string
+                    enum:
+                      - swe
+                      - qa
+                      - reviewer
+                    description: "PAUSED only: the role whose whole provider chain was limited; it restarts at its primary provider."
+                  paused_since:
+                    type: string
+                    format: date-time
+                    description: "PAUSED only: start of the pause streak; the attempt blocks after jobs.rate_limit_pause.max_total_hours."
+                  pause_count:
+                    type: integer
+                    minimum: 1
+                    maximum: 1000
+                    description: "PAUSED only: pauses in the current streak."
+                required:
+                  - job_id
+                  - issue_key
+                  - repository_id
+                  - base_sha
+                  - state
+                  - dry_run
+                  - repair_round
+                  - created_at
+                  - updated_at
+              example:
+                job_id: 00000000-0000-4000-8000-000000000001
+                issue_key: SAMPLE-123
+                repository_id: null
+                base_sha: null
+                state: PLANNED
+                dry_run: true
+                repair_round: 0
+                created_at: 2026-11-07T12:00:00.000Z
+                updated_at: 2026-11-07T12:00:00.000Z
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
   /v1/status:
     get:
       operationId: getStatus
