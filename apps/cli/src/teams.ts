@@ -152,7 +152,7 @@ export class TeamsAuthError extends AutosError {}
 /** A transient token failure (network, 429, 5xx): delivery treats it like a network error and retries. */
 class TransientTokenError extends Error {}
 
-export interface EntraTokenOptions { tenantId: string; clientId: string; clientSecret: string; cloud: TeamsCloud; fetch?: FetchLike; now?: () => number; timeoutMs?: number }
+export interface EntraTokenOptions { tenantId: string; clientId: string; clientSecret: string; cloud: TeamsCloud; fetch?: FetchLike; now?: () => number; timeoutMs?: number; /** Overrides the Power Automate scope, e.g. 'https://api.botframework.com/.default' for the bot. */ scope?: string }
 /**
  * Client-credentials tokens for the Power Automate audience, cached until five minutes before expiry. Errors carry the
  * HTTP status and Entra's short error name only: never the secret, the token or the response body.
@@ -168,7 +168,7 @@ export class EntraTokenSource {
     if (this.cached && now < this.cached.until) return this.cached.token;
     const { authority, audience } = TEAMS_CLOUD_ENDPOINTS[this.options.cloud];
     const url = new URL(`/${encodeURIComponent(this.options.tenantId)}/oauth2/v2.0/token`, authority);
-    const body = new URLSearchParams({ grant_type: 'client_credentials', client_id: this.options.clientId, client_secret: this.options.clientSecret, scope: `${audience}/.default` /* resource ending in "/" + "/.default" keeps the exact audience */ });
+    const body = new URLSearchParams({ grant_type: 'client_credentials', client_id: this.options.clientId, client_secret: this.options.clientSecret, scope: this.options.scope ?? `${audience}/.default` /* resource ending in "/" + "/.default" keeps the exact audience */ });
     const timeout = AbortSignal.timeout(this.options.timeoutMs ?? 15_000);
     let response: Response;
     try {

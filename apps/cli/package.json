@@ -14,6 +14,7 @@
     "@autos/contracts": "0.1.0",
     "@autos/controller": "0.1.0",
     "@autos/workflow": "0.1.0",
+    "jose": "6.2.13",
     "yaml": "2.9.1"
   },
   "bin": {

@@ -212,6 +212,24 @@ const notificationsSchema = z.strictObject({
   }).optional(),
 });
 
+/**
+ * Two-way Teams: `autos teams bot` receives Bot Framework activities (messages, card button submits) on a loopback
+ * port that a tunnel or reverse proxy exposes as the bot's messaging endpoint, and turns allowed users' commands into
+ * controller API calls. The bot is a single-tenant Azure Bot whose identity is the Entra app `app_id`; only the
+ * client secret is sensitive. Only Teams users listed in `allowed_users` (Entra object IDs) can run commands.
+ */
+const teamsBotSchema = z.strictObject({
+  app_id: entraIdSchema,
+  tenant_id: entraIdSchema,
+  client_secret_env: envNameSchema,
+  listen_host: z.enum(['127.0.0.1', '::1']).default('127.0.0.1'),
+  port: z.number().int().min(1024).max(65535).default(3978),
+  /** Entra object IDs of the Teams users who may command Autos. Everyone else is refused. */
+  allowed_users: z.array(entraIdSchema).min(1).max(100),
+  /** Longest note or instruction text accepted from Teams. */
+  max_note_chars: z.number().int().min(100).max(20_000).default(4000),
+});
+
 const configObjectSchema = z.strictObject({
   schema_version: z.literal(1),
   jira: z.strictObject({
@@ -280,6 +298,8 @@ const configObjectSchema = z.strictObject({
   api: z.strictObject({ listen_host: z.enum(['127.0.0.1', '::1']), port: z.number().int().min(1024).max(65535), operator_token_env: envNameSchema }),
   /** Optional outbound notifications (see notificationsSchema). */
   notifications: notificationsSchema.optional(),
+  /** Optional two-way Teams bot (see teamsBotSchema). */
+  teams_bot: teamsBotSchema.optional(),
 });
 /**
  * Per-section schemas of the configuration file (input form). A parsed AutosConfig is the resolved output (tier ladders
