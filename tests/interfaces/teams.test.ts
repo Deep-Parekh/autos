@@ -198,3 +198,48 @@ test('autos teams test signs posts with a bearer token, refreshes once on 401, e
     assert.ok(![...out, ...err, ...plainOut].join('\n').includes('S3CRET'));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('autos teams relay announces Autos up once per controller process, down after an outage, back up, and its own stop', async () => {
+  const monitor = monitorPort([]);
+  const workflow: WorkflowServicePort = { submit: async () => ready, execute: async () => ready, cancel: async () => ready, revise: async () => ready, retry: async () => ready, get: async () => ready, list: async () => [ready], poll: async () => undefined, ...monitor } as WorkflowServicePort;
+  const options: ControllerOptions = { config, workflow, operatorToken: TOKEN, sseHeartbeatMs: 40, runnerHealthTimeoutMs: 100,
+    artifacts: { write: async () => undefined, prepareRole: async () => ({ prompt_path: 'p', transcript_path: 't' }), manifest: async () => { throw new Error('none'); } },
+    providers: async () => [], projects: async () => [], testProviders: async () => [], close: async () => undefined };
+  let app = await createController(options); const base = await listen(app); const port = Number(new URL(base).port);
+  const dir = await mkdtemp(join(tmpdir(), 'autos-teams-life-')); const stops: AbortController[] = [];
+  try {
+    const configPath = join(dir, 'autos.yaml'); await writeFile(configPath, withTeams()); // default notify includes AUTOS_UP / AUTOS_DOWN
+    const env = { [config.api.operator_token_env]: TOKEN, AUTOS_TEAMS_WEBHOOK_URL: WEBHOOK };
+    const posted: unknown[] = [];
+    const teamsFetch = async (_url: URL, init: RequestInit) => { posted.push(JSON.parse(String(init.body))); return new Response(null, { status: 202 }); };
+    const run = () => { const stop = new AbortController(); stops.push(stop); const err: string[] = []; const done = main(['--config', configPath, 'teams', 'relay', '--url', base], { cwd: dir, env, signal: stop.signal, stdout: () => undefined, stderr: (l) => err.push(l), reconnectDelayMs: 20, teamsFetch, teamsRetryDelayMs: 1, teamsDownAfterMs: 0 }); return { stop, err, done }; };
+    const titles = () => posted.map((p) => (p as Card).attachments[0]!.content.body[0]!.text!);
+
+    const first = run();
+    await until(() => posted.length === 1);
+    assert.equal(titles()[0], '🟢 Autos is up');
+    assert.match(facts(posted[0])['Auto poll']!, /^(on|off)/); assert.ok(facts(posted[0])['Controller started']);
+    first.stop.abort(); assert.equal(await first.done, 0);
+    assert.equal(titles()[1], '⏹ Autos Teams notifications stopped');
+
+    // A relay restart against the same controller process does not announce it again.
+    const second = run();
+    await until(() => second.err.some((l) => l.includes('teams_relay_started')));
+    await until(() => monitor.listeners.size === 1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(posted.length, 2, 'same controller process: no second up card');
+
+    // The controller goes away: one down card; it comes back (a new process): one "back up" card.
+    await app.close();
+    await until(() => titles().includes('🔴 Autos is down: the controller stopped answering'));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(titles().filter((t) => t.startsWith('🔴')).length, 1, 'down is posted once per outage');
+    app = await createController(options); await app.listen({ host: '127.0.0.1', port });
+    await until(() => titles().includes('🟢 Autos is back up'));
+    const back = posted[titles().indexOf('🟢 Autos is back up')];
+    assert.ok(facts(back)['Down for']); assert.match(cardText(back), /Controller started/);
+    second.stop.abort(); assert.equal(await second.done, 0);
+    assert.equal(titles().at(-1), '⏹ Autos Teams notifications stopped');
+    assert.doesNotMatch(second.err.join('\n'), /SECRET|sig=/);
+  } finally { for (const stop of stops) stop.abort(); await app.close(); await rm(dir, { recursive: true, force: true }); }
+});

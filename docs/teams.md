@@ -41,7 +41,7 @@ Add the following to `config/config.yaml`:
 notifications:
   teams:
     webhook_url_env: AUTOS_TEAMS_WEBHOOK_URL
-    notify: [READY_FOR_HUMAN, BLOCKED, PAUSED]   # default
+    notify: [READY_FOR_HUMAN, BLOCKED, PAUSED, AUTOS_UP, AUTOS_DOWN]   # default
     include_commands: true                       # default
     # Only when the workflow requires sign-in (see "Tenants that require sign-in"):
     # auth:
@@ -55,6 +55,14 @@ notifications:
 - `CANCELLED`, `PLANNED` (dry runs);
 - `TIER_ESCALATED` (a role moved up a model tier);
 - `PROVIDER_GATE` (new tickets are waiting because every provider of the SWE start tier is limited).
+
+`AUTOS_UP` and `AUTOS_DOWN` (on by default) report Autos itself:
+- **🟢 Autos is up:** the relay has connected to a controller process it has not announced before. The card shows when the controller started, whether auto poll is on, and how many jobs are running, paused and queued. Restarting only the relay does not post it again.
+- **🔴 Autos is down:** the controller has stopped answering for 15 seconds, because it was stopped, crashed or the Mac went to sleep. It is posted once per outage.
+- **🟢 Autos is back up:** the controller answers again after a down card. The card shows how long Autos was down.
+- **⏹ Autos Teams notifications stopped:** the relay itself was stopped (Ctrl-C), so no more cards will come until it runs again.
+
+These cards come from the relay, so the relay has to be running to post them. If the relay and the controller stop together, you get the "notifications stopped" card.
 
 ## 3. Run
 

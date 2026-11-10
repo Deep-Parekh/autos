@@ -63,6 +63,8 @@ export function buildTeamsMessage(event: JobEvent, kind: TeamsNotifyKind, facts:
     PAUSED: [`⏸ ${key} paused: provider limits`, 'Warning'],
     TIER_ESCALATED: [`⬆ ${key}: ${event.role ?? 'role'} moved up to ${event.tier ?? 'the next tier'}`, 'Accent'],
     PROVIDER_GATE: ['⏳ New tickets are waiting: provider limits', 'Warning'],
+    AUTOS_UP: ['🟢 Autos is up', 'Good'],
+    AUTOS_DOWN: ['🔴 Autos is down', 'Attention'],
   };
   const [title, color] = titles[kind];
   const factList: Array<{ title: string; value: string }> = [];
@@ -86,14 +88,52 @@ export function buildTeamsMessage(event: JobEvent, kind: TeamsNotifyKind, facts:
     else if (kind === 'PAUSED' && jobId) commands.push(`autos status`, `autos jobs cancel ${jobId}`);
     else if (kind === 'PLANNED') commands.push(`autos run ${key}`);
   }
+  const actions = key ? [{ type: 'Action.OpenUrl', title: `Open ${key} in Jira`, url: new URL(`browse/${key}`, config.jira.site_url).toString() }] : [];
+  return adaptiveCard({ title, color, at: event.at, facts: factList, commands, actions });
+}
+
+interface CardParts { title: string; color: string; at: string; facts: Array<{ title: string; value: string }>; commands?: string[]; actions?: unknown[] }
+/** One Adaptive Card 1.4 in the Workflows message envelope (`attachments[].content`). */
+function adaptiveCard(parts: CardParts): Record<string, unknown> {
+  const commands = parts.commands ?? [];
   const body: unknown[] = [
-    { type: 'TextBlock', size: 'Medium', weight: 'Bolder', wrap: true, color, text: text(title, 200) },
-    { type: 'TextBlock', isSubtle: true, spacing: 'None', wrap: true, text: text(`Autos · ${event.at}`) },
-    ...(factList.length ? [{ type: 'FactSet', facts: factList }] : []),
+    { type: 'TextBlock', size: 'Medium', weight: 'Bolder', wrap: true, color: parts.color, text: text(parts.title, 200) },
+    { type: 'TextBlock', isSubtle: true, spacing: 'None', wrap: true, text: text(`Autos · ${parts.at}`) },
+    ...(parts.facts.length ? [{ type: 'FactSet', facts: parts.facts }] : []),
     ...(commands.length ? [{ type: 'TextBlock', text: 'Next steps', weight: 'Bolder', spacing: 'Medium' }, ...commands.map((c) => ({ type: 'TextBlock', text: c.replace(/[\u0000-\u001f\u007f]/g, ' '), fontType: 'Monospace', wrap: true, spacing: 'Small' }))] : []),
   ];
-  const actions = key ? [{ type: 'Action.OpenUrl', title: `Open ${key} in Jira`, url: new URL(`browse/${key}`, config.jira.site_url).toString() }] : [];
-  return { type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', contentUrl: null, content: { $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', type: 'AdaptiveCard', version: '1.4', msteams: { width: 'Full' }, body, actions } }] };
+  return { type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', contentUrl: null, content: { $schema: 'http://adaptivecards.io/schemas/adaptive-card.json', type: 'AdaptiveCard', version: '1.4', msteams: { width: 'Full' }, body, actions: parts.actions ?? [] } }] };
+}
+
+/** What the relay knows about the controller when it reports Autos up or down. */
+export interface LifecycleFacts {
+  /** started: first sighting of this controller process; back: reachable again after a DOWN card; down: unreachable; relay_stopped: the relay is exiting. */
+  variant: 'started' | 'back' | 'down' | 'relay_stopped';
+  controllerStartedAt?: string | null; downSince?: string | null; autoPoll?: boolean | null;
+  activeJobs?: number | null; pausedJobs?: number | null; queuedJobs?: number | null;
+}
+const duration = (ms: number): string => { const m = Math.max(0, Math.round(ms / 60_000)); return m < 1 ? 'under a minute' : m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
+/** Card for Autos coming up or going away. Facts come from the controller's status only. */
+export function buildLifecycleMessage(at: string, facts: LifecycleFacts): Record<string, unknown> {
+  const list: Array<{ title: string; value: string }> = [];
+  const add = (name: string, value: string | number | null | undefined) => { if (value !== null && value !== undefined && String(value).length) list.push({ title: name, value: text(String(value)) }); };
+  let title: string; let color: string; const commands: string[] = [];
+  if (facts.variant === 'down') {
+    title = '🔴 Autos is down: the controller stopped answering'; color = 'Attention';
+    add('Unreachable since', facts.downSince); add('Last started', facts.controllerStartedAt);
+    commands.push('autos controller start');
+  } else if (facts.variant === 'relay_stopped') {
+    title = '⏹ Autos Teams notifications stopped'; color = 'Warning';
+    add('Note', 'The relay was stopped. Jobs may keep running, but no cards are posted until the relay runs again.');
+    commands.push('autos teams relay');
+  } else {
+    title = facts.variant === 'back' ? '🟢 Autos is back up' : '🟢 Autos is up'; color = 'Good';
+    if (facts.variant === 'back' && facts.downSince) add('Down for', duration(Date.parse(at) - Date.parse(facts.downSince)));
+    add('Controller started', facts.controllerStartedAt);
+    if (facts.autoPoll !== null && facts.autoPoll !== undefined) add('Auto poll', facts.autoPoll ? 'on: working through the Jira filter' : 'off: only submitted tickets run');
+    add('Running', facts.activeJobs); add('Paused', facts.pausedJobs); add('Queued', facts.queuedJobs);
+  }
+  return adaptiveCard({ title, color, at, facts: list, commands });
 }
 
 export type FetchLike = (input: URL, init: RequestInit) => Promise<Response>;
@@ -182,18 +222,25 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => { const timer = setTimeout(done, ms); function done() { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); } signal?.addEventListener('abort', done, { once: true }); });
 }
 
-/** The relay's resume point (last processed event id), kept as a private 0600 file in the data directory. */
+/**
+ * The relay's resume point, kept as a private 0600 file in the data directory: the last processed event id, and the
+ * start time of the controller process last announced as up (so a relay restart does not announce it again).
+ */
+export interface RelayState { lastEventId: number | null; announcedControllerStart: string | null }
 export function cursorPath(dataDir: string): string { return join(dataDir, 'teams-relay.json'); }
-export async function readCursor(path: string): Promise<number | null> {
+export async function readRelayState(path: string): Promise<RelayState> {
   try {
     if ((await lstat(path)).isSymbolicLink()) throw new AutosError('POLICY', 'Teams relay cursor must not be a symlink');
-    const value = JSON.parse(await readFile(path, 'utf8')) as { last_event_id?: unknown };
-    return Number.isSafeInteger(value.last_event_id) && (value.last_event_id as number) >= 0 ? value.last_event_id as number : null;
-  } catch (error) { if (error instanceof AutosError) throw error; return null; }
+    const value = JSON.parse(await readFile(path, 'utf8')) as { last_event_id?: unknown; announced_controller_start?: unknown };
+    return {
+      lastEventId: Number.isSafeInteger(value.last_event_id) && (value.last_event_id as number) >= 0 ? value.last_event_id as number : null,
+      announcedControllerStart: typeof value.announced_controller_start === 'string' && value.announced_controller_start.length <= 64 ? value.announced_controller_start : null,
+    };
+  } catch (error) { if (error instanceof AutosError) throw error; return { lastEventId: null, announcedControllerStart: null }; }
 }
-export async function writeCursor(path: string, lastEventId: number): Promise<void> {
+export async function writeRelayState(path: string, state: { lastEventId: number; announcedControllerStart: string | null }): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${randomUUID()}.tmp`; const handle = await open(temp, 'wx', 0o600);
-  try { await handle.writeFile(JSON.stringify({ schema_version: 1, last_event_id: lastEventId })); } finally { await handle.close(); }
+  try { await handle.writeFile(JSON.stringify({ schema_version: 1, last_event_id: state.lastEventId, announced_controller_start: state.announcedControllerStart })); } finally { await handle.close(); }
   await rename(temp, path);
 }

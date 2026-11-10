@@ -9,7 +9,7 @@ import type { OperatorNoteRequest, WorkflowServicePort } from '@autos/contracts'
 import type { ControllerOptions, LoopStatus, ProviderDiagnostic, StatusResponse } from '@autos/controller';
 import { pollDelayMs, runControllerLoop, waitForSignalOrTimeout, type LoopSleep } from './loop.js';
 import { deepChecks, formatChecks, type CheckResult, type DeepDoctorDeps } from './deep-doctor.js';
-import { buildTeamsMessage, cursorPath, EntraTokenSource, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, readCursor, TierTracker, writeCursor, type FetchLike } from './teams.js';
+import { buildLifecycleMessage, buildTeamsMessage, cursorPath, EntraTokenSource, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, readRelayState, TierTracker, writeRelayState, type FetchLike, type LifecycleFacts } from './teams.js';
 
 export interface CliRuntime extends Omit<ControllerOptions, 'operatorToken' | 'fastifyOptions' | 'bindHost'> {
   testProviders(): Promise<ProviderDiagnostic[]>;
@@ -40,6 +40,8 @@ export interface CliDependencies {
   /** Test seams for `autos teams`: the webhook HTTP client and the delivery retry base delay. */
   teamsFetch?: FetchLike;
   teamsRetryDelayMs?: number;
+  /** How long the controller must stay unreachable before the relay posts an AUTOS_DOWN card (default 15 s). */
+  teamsDownAfterMs?: number;
 }
 
 export { pollDelayMs };
@@ -102,7 +104,7 @@ Commands:
   queue list [--limit N]          List recent jobs
   status [--url URL]              Show live controller, runner, and job activity (needs running controller)
   watch [--job JOB_ID] [--url URL]  Follow progress events live (Ctrl-C to stop)
-  teams relay [--from-start] [--url URL]  Post READY_FOR_HUMAN/BLOCKED/PAUSED/... cards to Teams (notifications.teams;
+  teams relay [--from-start] [--url URL]  Post READY/BLOCKED/PAUSED and Autos up/down cards to Teams (notifications.teams;
                                   needs running controller; resumes after the last posted event; Ctrl-C to stop)
   teams test                      Post one test card to the configured Teams webhook
   events [--job JOB_ID] [--after N] [--limit N] [--url URL]  List persisted progress events
@@ -523,14 +525,57 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
   const { flags, values } = parseFlags(args.slice(1), { bool: ['--from-start'], value: ['--url'] }, teamsUsage);
   const token = operatorToken(config, dependencies); const base = controllerBase(config, values.get('--url'));
   const cursorFile = cursorPath(resolve(dependencies.cwd ?? process.cwd(), config.storage.data_dir));
+  const saved = await readRelayState(cursorFile);
   // Resume after the last processed event; a first start begins at "now" (no replay of history) unless --from-start.
-  let cursor = flags.has('--from-start') ? 0 : await readCursor(cursorFile);
+  let cursor = flags.has('--from-start') ? 0 : saved.lastEventId;
+  // Start time of the controller process last announced as up: a relay restart does not announce the same process again.
+  let announced = saved.announcedControllerStart;
+  const save = () => writeRelayState(cursorFile, { lastEventId: cursor ?? 0, announcedControllerStart: announced });
   if (cursor === null) {
     const status = await controllerJson(endpoint(base, '/v1/status'), token);
     const last = isRecord(status) && isRecord(status.activity) && Number.isSafeInteger(status.activity.last_event_id) ? status.activity.last_event_id as number : 0;
-    cursor = last; await writeCursor(cursorFile, cursor);
+    cursor = last; await save();
   }
   const wanted = new Set(teams.notify); const tiers = new TierTracker();
+  const now = () => dependencies.now?.() ?? Date.now(); const iso = (ms: number) => new Date(ms).toISOString();
+  const downAfterMs = dependencies.teamsDownAfterMs ?? 15_000;
+  let disconnectedAt: number | null = null; let downPosted = false;
+  /** Controller facts for an up card; null when status cannot be read (the card then goes out without them). */
+  const controllerFacts = async (): Promise<Omit<LifecycleFacts, 'variant'> | null> => {
+    try {
+      const status = await controllerJson(endpoint(base, '/v1/status'), token, { signal: abort.signal });
+      if (!isRecord(status)) return null;
+      const controller = isRecord(status.controller) ? status.controller : {}; const activity = isRecord(status.activity) ? status.activity : {};
+      const loop = isRecord(controller.poll_loop) ? controller.poll_loop : {}; const counts = isRecord(activity.counts) ? activity.counts : {};
+      return {
+        controllerStartedAt: typeof controller.started_at === 'string' ? controller.started_at : null,
+        autoPoll: typeof loop.auto_poll === 'boolean' ? loop.auto_poll : null,
+        activeJobs: Array.isArray(activity.active_jobs) ? activity.active_jobs.length : null,
+        pausedJobs: Array.isArray(activity.paused_jobs) ? activity.paused_jobs.length : null,
+        queuedJobs: typeof counts.QUEUED === 'number' ? counts.QUEUED : null,
+      };
+    } catch (error) { if (abort.signal.aborted) throw error; return null; }
+  };
+  const postLifecycle = async (kind: 'AUTOS_UP' | 'AUTOS_DOWN', facts: LifecycleFacts, options: { signal?: AbortSignal; attempts?: number } = {}) => {
+    const result = await postTeamsMessage(webhook, buildLifecycleMessage(iso(now()), facts), { ...delivery, ...options });
+    log(result.ok ? { event: 'teams_notified', kind, variant: facts.variant } : { event: 'teams_delivery_failed', kind, variant: facts.variant, status: result.status, ...(hint(result.status) ? { hint: hint(result.status).trim() } : {}) });
+  };
+  /** Called on every (re)connection: announces a newly started controller process, or recovery after a DOWN card. */
+  const connected = async () => {
+    const facts = await controllerFacts(); const startedAt = facts?.controllerStartedAt ?? null;
+    const newProcess = startedAt !== null && startedAt !== announced;
+    if (wanted.has('AUTOS_UP') && (downPosted || newProcess)) await postLifecycle('AUTOS_UP', { variant: downPosted ? 'back' : 'started', ...(facts ?? {}), ...(downPosted && disconnectedAt !== null ? { downSince: iso(disconnectedAt) } : {}) }, { signal: abort.signal });
+    if (startedAt !== null) announced = startedAt;
+    disconnectedAt = null; downPosted = false; await save();
+  };
+  /** Called after a failed (re)connection: posts one DOWN card once the controller has been unreachable for downAfterMs. */
+  const markUnreachable = async () => {
+    disconnectedAt ??= now();
+    if (wanted.has('AUTOS_DOWN') && !downPosted && now() - disconnectedAt >= downAfterMs) {
+      downPosted = true;
+      await postLifecycle('AUTOS_DOWN', { variant: 'down', downSince: iso(disconnectedAt), controllerStartedAt: announced }, { signal: abort.signal });
+    }
+  };
   const abort = new AbortController(); const stop = () => abort.abort(); const external = dependencies.signal;
   if (external) { if (external.aborted) abort.abort(); else external.addEventListener('abort', stop, { once: true }); }
   else { process.once('SIGINT', stop); process.once('SIGTERM', stop); }
@@ -551,7 +596,7 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
       log(result.ok ? { event: 'teams_notified', kind, issue_key: event.issue_key, event_id: event.event_id } : { event: 'teams_delivery_failed', kind, issue_key: event.issue_key, event_id: event.event_id, status: result.status, ...(hint(result.status) ? { hint: hint(result.status).trim() } : {}) });
     }
     if (event.type === 'job_finished') tiers.forget(event.job_id);
-    cursor = event.event_id; await writeCursor(cursorFile, cursor);
+    cursor = event.event_id; await save();
   };
   let attempts = 0; let everConnected = false;
   try {
@@ -560,6 +605,7 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
         const response = await controllerFetch(endpoint(base, '/v1/events/stream', { after: cursor }), token, { signal: abort.signal, headers: { accept: 'text/event-stream', 'last-event-id': String(cursor) } });
         if (!response.body) throw unreachable();
         everConnected = true; attempts = 0;
+        await connected();
         const pending: JobEvent[] = [];
         const parse = createSseParser((message) => {
           let value: unknown; try { value = JSON.parse(message.data); } catch { return; }
@@ -570,15 +616,19 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
           parse(decoder.decode(chunk, { stream: true }));
           while (pending.length) await handle(pending.shift()!);
         }
+        disconnectedAt ??= now(); // the stream ended: the controller stopped or restarted
       } catch (error) {
         if (abort.signal.aborted) break;
         if (error instanceof AutosError && (error.code !== 'UPSTREAM' || !everConnected)) throw error;
+        await markUnreachable();
       }
       if (abort.signal.aborted) break;
       attempts++;
       log({ event: 'teams_relay_reconnecting', attempt: attempts, last_event_id: cursor });
       await waitForSignalOrTimeout(abort.signal, dependencies.reconnectDelayMs ?? Math.min(1000 * 2 ** Math.min(attempts - 1, 4), 10_000));
     }
+    // The relay is exiting (Ctrl-C): say so, once, with a short deadline that the stop itself does not cancel.
+    if (everConnected && wanted.has('AUTOS_DOWN')) await postLifecycle('AUTOS_DOWN', { variant: 'relay_stopped' }, { signal: AbortSignal.timeout(5_000), attempts: 1 }).catch(() => undefined);
     return 0;
   } finally { process.removeListener('SIGINT', stop); process.removeListener('SIGTERM', stop); external?.removeEventListener('abort', stop); }
 }

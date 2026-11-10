@@ -284,7 +284,7 @@ Artifacts, including the private per-invocation prompt and transcript files that
 - `autos watch [--job JOB_ID]` follows `GET /v1/events/stream` and prints one line per event, for example `12:01:03 SAMPLE-123 role_started swe/claude round 0 stage=implementation` (UTC time; service-level events such as polling show `service`). It reconnects with `Last-Event-ID` after a dropped connection and exits cleanly on Ctrl-C. `--json` prints one JSON event per line.
 - `autos events [--job JOB_ID] [--after N] [--limit N]` prints persisted events after a cursor (default 100 per call, up to 500).
 
-- `autos teams relay` posts cards for finished, blocked and paused attempts to a Teams channel or chat; `autos teams test` checks the webhook. See [teams.md](teams.md).
+- `autos teams relay` posts cards for finished, blocked and paused attempts, and when Autos comes up or goes down, to a Teams channel or chat; `autos teams test` checks the webhook. See [teams.md](teams.md).
 
 Typical use: `ssh host`, then `autos status` or `autos watch`. See [api-publishing.md](api-publishing.md) for the SSH-tunnel alternative with curl. Event text is sanitized: no prompts, transcripts, tokens, URLs, or filesystem paths.
 
