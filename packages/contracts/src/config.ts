@@ -193,6 +193,12 @@ const notificationsSchema = z.strictObject({
     /** Add copyable `autos …` follow-up commands (show, revise, close, retry) to each card. */
     include_commands: z.boolean().default(true),
     /**
+     * Request body shape. `message` (default) wraps the card as `{type: 'message', attachments: [{content: card}]}`,
+     * which Microsoft's "Send webhook alerts" template loops over. `card` sends the Adaptive Card itself, for a
+     * hand-built workflow whose "Post a card" step uses the trigger's Body as the card.
+     */
+    payload: z.enum(['message', 'card']).default('message'),
+    /**
      * Sign each post with a Microsoft Entra ID app token, for workflows whose trigger is set to "Any user in my tenant"
      * or "Specific users in my tenant" (tenants that do not allow "Anyone"). The relay uses the client-credentials grant
      * for the Power Automate audience of `cloud`. Only the secret is sensitive: it lives in `client_secret_env`.

@@ -508,6 +508,8 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
   const env = dependencies.env ?? process.env;
   const webhook = parseTeamsWebhookUrl(env[teams.webhook_url_env], teams.webhook_url_env);
   const auth = teams.auth ? new EntraTokenSource({ tenantId: teams.auth.tenant_id, clientId: teams.auth.client_id, clientSecret: requireEnv(env, teams.auth.client_secret_env), cloud: teams.auth.cloud, ...(dependencies.teamsFetch ? { fetch: dependencies.teamsFetch } : {}), ...(dependencies.now ? { now: dependencies.now } : {}) }) : undefined;
+  // payload: card sends the Adaptive Card itself instead of the Workflows message envelope.
+  const shape = (message: Record<string, unknown>): unknown => teams.payload === 'card' ? (message.attachments as Array<{ content: unknown }>)[0]!.content : message;
   const delivery = { ...(dependencies.teamsFetch ? { fetch: dependencies.teamsFetch } : {}), ...(dependencies.teamsRetryDelayMs !== undefined ? { retryDelayMs: dependencies.teamsRetryDelayMs } : {}), ...(auth ? { auth } : {}) };
   // 401 without sign-in configured: the workflow trigger is restricted to tenant users (see docs/teams.md, "Sign-in").
   const hint = (status: number | null) => status === 401 ? (auth ? ' The token was refused: check that the trigger allows this app (its Enterprise application object ID) and the cloud setting.' : ' The workflow requires sign-in: set notifications.teams.auth (docs/teams.md, "Tenants that require sign-in").') : status === 403 ? ' The app is not allowed to trigger this workflow: add its Enterprise application object ID to the trigger\'s allowed users.' : '';
@@ -517,7 +519,7 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
     // A test card names no issue: replace the title so it reads as a connectivity check.
     const content = (payload.attachments as Array<{ content: { body: Array<{ text?: string }> } }>)[0]!.content;
     content.body[0]!.text = '🔔 Autos Teams notifications are connected'; content.body.splice(2);
-    const result = await postTeamsMessage(webhook, payload, delivery);
+    const result = await postTeamsMessage(webhook, shape(payload), delivery);
     report(json ? { delivered: result.ok, status: result.status } : result.ok ? `Test card delivered (HTTP ${result.status}).` : `Test card was not delivered (${result.status === null ? 'network error' : `HTTP ${result.status}`}).${hint(result.status)}`, json, stdout);
     return result.ok ? 0 : 1;
   }
@@ -557,7 +559,7 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
     } catch (error) { if (abort.signal.aborted) throw error; return null; }
   };
   const postLifecycle = async (kind: 'AUTOS_UP' | 'AUTOS_DOWN', facts: LifecycleFacts, options: { signal?: AbortSignal; attempts?: number } = {}) => {
-    const result = await postTeamsMessage(webhook, buildLifecycleMessage(iso(now()), facts), { ...delivery, ...options });
+    const result = await postTeamsMessage(webhook, shape(buildLifecycleMessage(iso(now()), facts)), { ...delivery, ...options });
     log(result.ok ? { event: 'teams_notified', kind, variant: facts.variant } : { event: 'teams_delivery_failed', kind, variant: facts.variant, status: result.status, ...(hint(result.status) ? { hint: hint(result.status).trim() } : {}) });
   };
   /** Called on every (re)connection: announces a newly started controller process, or recovery after a DOWN card. */
@@ -590,7 +592,7 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
         try { const parsedJob = jobRecordSchema.safeParse(await controllerJson(endpoint(base, `/v1/jobs/${event.job_id}`), token, { signal: abort.signal })); job = parsedJob.success ? parsedJob.data as JobRecord : null; }
         catch (error) { if (abort.signal.aborted) throw error; job = null; } // the card still goes out with the event's own facts
       }
-      const result = await postTeamsMessage(webhook, buildTeamsMessage(event, kind, { job, tier: tiers.get(event.job_id) }, config), { ...delivery, signal: abort.signal });
+      const result = await postTeamsMessage(webhook, shape(buildTeamsMessage(event, kind, { job, tier: tiers.get(event.job_id) }, config)), { ...delivery, signal: abort.signal });
       // At-least-once while the relay runs; a card that still fails after retries is logged and skipped so one bad
       // delivery cannot stall every later notification.
       log(result.ok ? { event: 'teams_notified', kind, issue_key: event.issue_key, event_id: event.event_id } : { event: 'teams_delivery_failed', kind, issue_key: event.issue_key, event_id: event.event_id, status: result.status, ...(hint(result.status) ? { hint: hint(result.status).trim() } : {}) });

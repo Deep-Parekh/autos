@@ -33,6 +33,10 @@ The relay requests a client-credentials token for the Power Automate audience (`
 
 Entra client secrets expire: put a reminder in your calendar for the expiry you chose.
 
+### Building the workflow by hand
+
+If you build the flow yourself instead of using a template, it needs two steps: **When a webhook request is received**, then **Post a card to a chat or channel**. In the card step, set **Adaptive card** to the trigger's **Body** and add `payload: card` under `notifications.teams` in the config. The relay then sends the bare Adaptive Card rather than the `attachments` envelope that the templates expect.
+
 ## 2. Configure
 
 Add the following to `config/config.yaml`:
@@ -43,6 +47,7 @@ notifications:
     webhook_url_env: AUTOS_TEAMS_WEBHOOK_URL
     notify: [READY_FOR_HUMAN, BLOCKED, PAUSED, AUTOS_UP, AUTOS_DOWN]   # default
     include_commands: true                       # default
+    payload: message                             # default; `card` for a hand-built flow using Body as the card
     # Only when the workflow requires sign-in (see "Tenants that require sign-in"):
     # auth:
     #   tenant_id: 00000000-0000-0000-0000-000000000000   # Directory (tenant) ID

@@ -243,3 +243,16 @@ test('autos teams relay announces Autos up once per controller process, down aft
     assert.doesNotMatch(second.err.join('\n'), /SECRET|sig=/);
   } finally { for (const stop of stops) stop.abort(); await app.close(); await rm(dir, { recursive: true, force: true }); }
 });
+
+test('payload: card posts the bare Adaptive Card for workflows that use the trigger Body as the card', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'autos-teams-card-'));
+  try {
+    const configPath = join(dir, 'autos.yaml'); await writeFile(configPath, withTeams('    payload: card\n'));
+    const posted: Array<Record<string, unknown>> = [];
+    const teamsFetch = async (_url: URL, init: RequestInit) => { posted.push(JSON.parse(String(init.body))); return new Response(null, { status: 202 }); };
+    assert.equal(await main(['--config', configPath, 'teams', 'test'], { cwd: dir, env: { AUTOS_TEAMS_WEBHOOK_URL: WEBHOOK }, stdout: () => undefined, stderr: () => undefined, teamsFetch }), 0);
+    assert.equal(posted[0]!.type, 'AdaptiveCard'); assert.equal(posted[0]!.version, '1.4'); assert.equal(posted[0]!.attachments, undefined);
+    assert.match(JSON.stringify(posted[0]), /notifications are connected/);
+    assert.equal(parseConfigYaml(withTeams()).notifications?.teams?.payload, 'message');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
