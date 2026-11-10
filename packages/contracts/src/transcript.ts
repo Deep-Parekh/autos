@@ -126,6 +126,28 @@ function codexActions(event: Json, seen: Set<string>, out: TranscriptAction[]): 
   }
 }
 
+/**
+ * The actions of one stream line (one JSON event); [] for anything else. `seen` de-duplicates codex started/completed
+ * pairs across the lines of one session, so pass the same set for every line of a stream. Never throws.
+ */
+export function transcriptActionsFromLine(rawLine: string, seen: Set<string>): TranscriptAction[] {
+  try {
+    if (typeof rawLine !== 'string' || rawLine.length > MAX_SCAN_CHARS) return [];
+    const line = rawLine.trim();
+    if (!line.startsWith('{')) return [];
+    let event: Json | undefined;
+    try { event = record(JSON.parse(line)); } catch { return []; }
+    if (!event) return [];
+    const out: TranscriptAction[] = [];
+    if (event.type === 'assistant') claudeActions(event, out);
+    else if (event.type === 'tool_call') cursorToolCall(event, out);
+    else if (event.type === 'item.started' || event.type === 'item.completed') codexActions(event, seen, out);
+    return out;
+  } catch {
+    return [];
+  }
+}
+
 export function summarizeTranscriptActions(text: string, limit: number = TRANSCRIPT_ACTION_LIMIT): TranscriptAction[] {
   try {
     if (typeof text !== 'string') return [];
@@ -142,14 +164,7 @@ export function summarizeTranscriptActions(text: string, limit: number = TRANSCR
     const actions: TranscriptAction[] = [];
     const seen = new Set<string>();
     for (const rawLine of body.split('\n')) {
-      const line = rawLine.trim();
-      if (!line.startsWith('{') || line === '[transcript truncated]') continue;
-      let event: Json | undefined;
-      try { event = record(JSON.parse(line)); } catch { continue; }
-      if (!event) continue;
-      if (event.type === 'assistant') claudeActions(event, actions);
-      else if (event.type === 'tool_call') cursorToolCall(event, actions);
-      else if (event.type === 'item.started' || event.type === 'item.completed') codexActions(event, seen, actions);
+      actions.push(...transcriptActionsFromLine(rawLine, seen));
       if (actions.length > max * 4) actions.splice(0, actions.length - max);
     }
     return actions.slice(-max);

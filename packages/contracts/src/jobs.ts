@@ -48,6 +48,8 @@ export const jobRecordSchema = z.strictObject({
 /**
  * Progress events. Persisted by the workflow (SQLite) so any process (controller, `autos status`) sees the same
  * history. Events carry sanitized metadata only: never prompts, transcripts, diffs, tokens, URLs or filesystem paths.
+ * Exception: `role_progress` messages may name a workspace-relative file path or a short command label (see
+ * progress.ts). They are informational only, never change job state, and are not exported in datasets.
  */
 export const JOB_EVENT_TYPES = [
   'job_queued', 'job_started', 'state_changed', 'stage_started', 'stage_finished',
@@ -55,7 +57,7 @@ export const JOB_EVENT_TYPES = [
   'repair_round_started', 'commit_created', 'push_finished', 'job_finished',
   'poll_started', 'poll_finished', 'poll_failed', 'recovered', 'revision_requested', 'provider_fallback',
   'issue_closed', 'workspaces_pruned', 'job_paused', 'job_resumed', 'provider_gate_opened', 'provider_gate_closed',
-  'tier_selected', 'tier_escalated',
+  'tier_selected', 'tier_escalated', 'role_progress',
 ] as const;
 export const jobEventTypeSchema = z.enum(JOB_EVENT_TYPES);
 export const WORKFLOW_STAGES = ['intake', 'routing', 'baseline', 'implementation', 'checks', 'qa', 'review', 'repair', 'finalize', 'push'] as const;

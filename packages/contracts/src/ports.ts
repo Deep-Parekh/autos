@@ -6,6 +6,7 @@ import type { ProviderAuthSummary } from './execution.js';
 import type { ProviderCall } from './dataset.js';
 import type { InstalledToolchains, ToolchainSelection } from './toolchain.js';
 import type { CloseIssueRequest, CloseIssueResult, IssueClosure, IssueResolution, JobEvent, OperatorNoteRequest, PruneWorkspacesRequest, PruneWorkspacesResult, TicketNote, TicketNotesSummary, TierPin, TierPinRequest, TierPinResult, WorkflowActivity, WorkspaceEntry } from './jobs.js';
+import type { ProgressUpdate } from './progress.js';
 
 export interface AtlassianReadPort {
   getSavedFilter(filterId: string, signal?: AbortSignal): Promise<SavedFilter>;
@@ -120,7 +121,11 @@ export interface ProviderResult {
 /** Executes within an already established boundary; not a host sandbox. */
 export interface ProviderAdapterPort { run(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> }
 export interface RunnerPort {
-  runRole(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult>;
+  /**
+   * `onProgress` (optional, best effort) receives sanitized agent actions while the role runs. Runners that cannot
+   * stream simply never call it; a throwing callback must not affect the role.
+   */
+  runRole(request: ProviderRequest, signal?: AbortSignal, onProgress?: (update: ProgressUpdate) => void): Promise<ProviderResult>;
   runChecks(workspace: GitWorkspace, candidateDigest: string, commands: CheckCommand[], signal?: AbortSignal, options?: RunChecksOptions): Promise<Checks>;
   stop(jobId: string): Promise<void>;
   /** Optional readiness of the isolation boundary (supervisor + Docker). Must not start a container. */

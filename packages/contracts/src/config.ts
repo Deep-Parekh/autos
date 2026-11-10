@@ -173,7 +173,7 @@ const binarySchema = z.strictObject({ binary: z.string().min(1), auth_profile: i
  * escalations, the new-ticket provider gate, and Autos itself coming up (AUTOS_UP) or going away (AUTOS_DOWN: the
  * controller stopped answering, or the relay itself stopped).
  */
-export const TEAMS_NOTIFY_KINDS = ['READY_FOR_HUMAN', 'BLOCKED', 'CANCELLED', 'PLANNED', 'PAUSED', 'TIER_ESCALATED', 'PROVIDER_GATE', 'AUTOS_UP', 'AUTOS_DOWN'] as const;
+export const TEAMS_NOTIFY_KINDS = ['READY_FOR_HUMAN', 'BLOCKED', 'CANCELLED', 'PLANNED', 'PAUSED', 'TIER_ESCALATED', 'PROVIDER_GATE', 'AUTOS_UP', 'AUTOS_DOWN', 'AGENT_PROGRESS'] as const;
 export type TeamsNotifyKind = typeof TEAMS_NOTIFY_KINDS[number];
 /** Microsoft clouds whose Power Automate audience the Teams relay can request tokens for. */
 export const TEAMS_CLOUDS = ['public', 'gcc', 'gcch', 'dod', 'china'] as const;
