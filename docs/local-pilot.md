@@ -16,6 +16,8 @@ Status: the synthetic scenario and the Docker isolation tests pass locally. The 
 
 ## 1. Prerequisites
 
+The full list of host software, folders and images, with a quick check for a new machine, is in [environment-requirements.md](environment-requirements.md).
+
 - Docker Desktop running (`docker info` succeeds).
 - Node 22.20+, then `npm ci --ignore-scripts && npm run build` and `npm run check` passing.
 - An Atlassian Cloud account that can read the private saved filter and the branch-map page, plus an [API token](https://id.atlassian.com/manage-profile/security/api-tokens).

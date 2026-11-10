@@ -14,6 +14,7 @@ Limits: the scenario uses a **test-only local runner that is not an isolation bo
 
 - [Server setup](docs/server-setup.md) — Ubuntu deployment: Compose controller, systemd supervisor, credentials, safe first run.
 - [Local pilot on macOS](docs/local-pilot.md) — the same flow on a Mac with Docker Desktop.
+- [Environment requirements](docs/environment-requirements.md) — what must be installed on the host and in the Docker images on a new machine.
 - [Architecture diagram](docs/architecture/autos-server-architecture.html) — components, trust boundaries and the life of one ticket.
 - [Implementation plan](docs/implementation-plan.md) — scope, architecture, delivery order, and decisions needed before coding.
 - [Independent implementation tasks](docs/implementation-tasks.md) — six GPT-6 Luna workstreams, ownership, dependencies, and acceptance criteria.
