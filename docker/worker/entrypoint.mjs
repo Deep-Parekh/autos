@@ -1,7 +1,7 @@
 import { cp, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CliProviderAdapter } from '@autos/cli-adapters';
-import { ERROR_CODES } from '@autos/contracts';
+import { ERROR_CODES, ProgressThrottle, formatProgressLine, progressFromLine } from '@autos/contracts';
 
 const DEFAULT_TIMEOUT_MS = 3_600_000;
 const MAX_TIMEOUT_MS = 86_400_000;
@@ -31,6 +31,7 @@ function safeErrorCode(error) {
 }
 
 let invocation = {};
+let progressThrottle;
 
 function parseArgs(argv) {
   const args = {};
@@ -73,6 +74,12 @@ async function main() {
     maxTranscriptBytes,
     resolveAuth: async (_profile, provider) => Object.fromEntries(authNames[provider].filter((name) => process.env[name]).map((name) => [name, process.env[name]])),
   });
+  const seen = new Set();
+  progressThrottle = new ProgressThrottle({
+    intervalMs: 2_000,
+    maxUpdates: 2_000,
+    emit: (update) => { process.stderr.write(`${formatProgressLine(update)}\n`); },
+  });
   const result = await adapter.run({
     job_id: process.env.AUTOS_JOB_ID,
     issue_key: process.env.AUTOS_ISSUE_KEY,
@@ -86,12 +93,17 @@ async function main() {
     timeout_ms: timeoutMs,
     source_access: args.role === 'swe' ? 'write' : 'read',
     auth_profile: args['auth-profile'],
+  }, undefined, (line) => {
+    for (const action of progressFromLine(line, seen)) progressThrottle.push(action);
   });
+  progressThrottle.flush();
+  progressThrottle.close();
   process.stdout.write(`${JSON.stringify({ job_id: process.env.AUTOS_JOB_ID, issue_key: process.env.AUTOS_ISSUE_KEY, result })}\n`);
   process.exitCode = result.status === 'SUCCEEDED' ? 0 : 1;
 }
 
 main().catch((error) => {
+  progressThrottle?.close();
   const code = safeErrorCode(error);
   const valid = ['claude', 'codex', 'cursor'].includes(invocation.provider) && ['swe', 'qa', 'reviewer'].includes(invocation.role) && typeof invocation.transcript === 'string';
   if (valid && process.env.AUTOS_JOB_ID && process.env.AUTOS_ISSUE_KEY) {

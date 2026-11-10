@@ -3,7 +3,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { resolveToolchain, missingToolchains, installedToolchainsSchema, type ToolchainSelection, closeIssueRequestSchema, providerCallSchema, datasetRecordSchema, datasetExportOptionsSchema, type ProviderCall, type DatasetRecord, type DatasetExportOptions, type AutosConfig, closeIssueResultSchema, issueClosureSchema, pruneWorkspacesRequestSchema, pruneWorkspacesResultSchema, workspaceEntrySchema, WORKSPACE_DIR_NAME_PATTERN, type IssueClosure, type IssueResolution, type CloseIssueRequest, type CloseIssueResult, type PruneWorkspacesRequest, type PruneWorkspacesResult, type WorkspaceEntry, artifactManifestSchema, AutosError, FALLBACK_ERROR_CODES, HANDOFF_ERROR_CODES, INSTRUCTION_FILE_BASENAMES, INSTRUCTION_FILE_PATTERNS, HANDOFF_DIR, type RepositoryConfig, type RepositoryInstructionFile, providerAttemptSchema, type ProviderAttempt, operatorNoteRequestSchema, operatorNoteSchema, ticketNoteSchema, ticketNotesSummarySchema, MAX_TICKET_NOTES, type TicketNote, type TicketNotesSummary, type OperatorNote, type OperatorNoteRequest, jobEventSchema, workflowActivitySchema, canTransition, checksSchema, evaluateFinalization, issueKeySchema, jobIdSchema, jobRecordSchema, jobStateSchema, relativePathSchema, roleSchema, timestampSchema, type ArtifactManifest, type JobRecord, type JobState, type WorkflowDependencies, type WorkflowServicePort, type GitWorkspace, type ProviderResult, type Checks, type QaResult, type ReviewResult, type JobEvent, type NewJobEvent, type WorkflowActivity, type WorkflowStage, providerSchema, PAUSE_ERROR_CODES, pauseCheckpointSchema, summarizeTranscriptActions, type PauseCheckpoint, type TranscriptAction, type AgentRole, type ErrorCode, tierPinSchema, tierPinRequestSchema, type TierPin, type TierPinRequest, type TierPinResult, parseTierStep, formatTierStep, type ResolvedChainEntry, type TierStepRef } from '@autos/contracts';
+import { resolveToolchain, missingToolchains, installedToolchainsSchema, type ToolchainSelection, closeIssueRequestSchema, providerCallSchema, datasetRecordSchema, datasetExportOptionsSchema, type ProviderCall, type DatasetRecord, type DatasetExportOptions, type AutosConfig, closeIssueResultSchema, issueClosureSchema, pruneWorkspacesRequestSchema, pruneWorkspacesResultSchema, workspaceEntrySchema, WORKSPACE_DIR_NAME_PATTERN, type IssueClosure, type IssueResolution, type CloseIssueRequest, type CloseIssueResult, type PruneWorkspacesRequest, type PruneWorkspacesResult, type WorkspaceEntry, artifactManifestSchema, AutosError, FALLBACK_ERROR_CODES, HANDOFF_ERROR_CODES, INSTRUCTION_FILE_BASENAMES, INSTRUCTION_FILE_PATTERNS, HANDOFF_DIR, type RepositoryConfig, type RepositoryInstructionFile, providerAttemptSchema, type ProviderAttempt, operatorNoteRequestSchema, operatorNoteSchema, ticketNoteSchema, ticketNotesSummarySchema, MAX_TICKET_NOTES, type TicketNote, type TicketNotesSummary, type OperatorNote, type OperatorNoteRequest, jobEventSchema, workflowActivitySchema, canTransition, checksSchema, evaluateFinalization, issueKeySchema, jobIdSchema, jobRecordSchema, jobStateSchema, relativePathSchema, roleSchema, timestampSchema, type ArtifactManifest, type JobRecord, type JobState, type WorkflowDependencies, type WorkflowServicePort, type GitWorkspace, type ProviderResult, type Checks, type QaResult, type ReviewResult, type JobEvent, type NewJobEvent, type WorkflowActivity, type WorkflowStage, providerSchema, PAUSE_ERROR_CODES, pauseCheckpointSchema, summarizeTranscriptActions, type PauseCheckpoint, type TranscriptAction, type AgentRole, type ErrorCode, tierPinSchema, tierPinRequestSchema, type TierPin, type TierPinRequest, type TierPinResult, parseTierStep, formatTierStep, type ResolvedChainEntry, type TierStepRef, type ProgressUpdate, progressUpdateSchema, ProgressThrottle } from '@autos/contracts';
 import { tierStateSchema, selectStart, placePin, resolveStep, escalate as escalateTier, ladderOf, parseTriage, triagePrompt, ROLE_NAMES, type TierState, type RoleTierState, type TriageChoice } from './tiers.js';
 
 /** JobRecord plus the revision fields (the exported interface may lag the Zod schema). */
@@ -620,6 +620,13 @@ function sanitizeEventMessage(value: string): string {
     .replace(/(?:~|\.{1,2})?(?:\/[\w.@-]+){2,}\/?/g, '[path]').replace(/\s+/g, ' ').trim().slice(0, 300);
 }
 
+/** Progress labels are already reduced to tool names, relative paths and counts by the contracts parser. */
+function sanitizeProgressMessage(value: string): string {
+  return value.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '[url]').replace(/\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [redacted]')
+    .replace(/\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|password)\s*[:=]\s*\S+/gi, '$1=[redacted]')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300);
+}
+
 function fromRow(row: Record<string, unknown>): Job {
   return jobRecordSchema.parse({ job_id: String(row.job_id), issue_key: String(row.issue_key), repository_id: row.repository_id as string | null, base_sha: row.base_sha as string | null,
     state: String(row.state) as JobState, dry_run: Boolean(row.dry_run), repair_round: Number(row.repair_round), created_at: String(row.created_at), updated_at: String(row.updated_at),
@@ -730,7 +737,8 @@ const MINUTE_MS = 60_000;
 class SlotUnavailableError extends AutosError {
   constructor(readonly reason: ClaimResult) { super('CONFLICT', reason === 'ISSUE_BUSY' ? 'Another attempt for this issue is active' : 'Another workflow job is active'); }
 }
-export interface WorkflowOptions { leaseMs?: number; /** Heartbeat period; default min(60 s, leaseMs/3). */ heartbeatMs?: number; owner?: string; id?: () => string; }
+export interface WorkflowOptions { leaseMs?: number; /** Heartbeat period; default min(60 s, leaseMs/3). */ heartbeatMs?: number; owner?: string; id?: () => string; progressIntervalMs?: number; fileProgressIntervalMs?: number; }
+interface RoleProgressState { actions: number; commandActions: number; emitted: number }
 /** Lease TTL and heartbeat (10 min lease renewed every 60 s; up to 2 consecutive failed heartbeats are tolerated). */
 export const DEFAULT_LEASE_MS = 600_000;
 export const DEFAULT_HEARTBEAT_MS = 60_000;
@@ -845,12 +853,74 @@ export class WorkflowService implements WorkflowServicePort {
   private emit(event: NewJobEvent): void {
     let saved: JobEvent;
     try {
-      const safe = event.message === undefined ? event : { ...event, message: sanitizeEventMessage(event.message) };
+      const safe = event.message === undefined ? event : { ...event, message: event.type === 'role_progress' ? sanitizeProgressMessage(event.message) : sanitizeEventMessage(event.message) };
       saved = (this.jobs as SqliteJobStore).appendEvent(safe, nowIso(this.deps.clock.now()));
     } catch { return; }
     for (const listener of [...this.listeners]) { try { listener(saved); } catch { /* subscriber failures are isolated */ } }
   }
   private jobEvent(job: Job, event: Omit<NewJobEvent, 'job_id' | 'issue_key'>): void { this.emit({ job_id: job.job_id, issue_key: job.issue_key, ...event }); }
+  /** Wrap one actual runner session. Progress is deliberately isolated from the session's result and cleanup path. */
+  private async runRoleWithProgress(job: Job, workspace: GitWorkspace, role: AgentRole, provider: ProviderResult['provider'], request: Parameters<WorkflowDependencies['runner']['runRole']>[0], signal?: AbortSignal, progress: RoleProgressState = { actions: 0, commandActions: 0, emitted: 0 }): Promise<ProviderResult> {
+    let closed = false; let files: { changed: number; added: number; removed: number } | undefined;
+    const emit = (message: string) => {
+      if (progress.emitted >= 300) return;
+      progress.emitted++;
+      this.jobEvent(job, { type: 'role_progress', role, provider, count: progress.actions, message });
+    };
+    const throttle = new ProgressThrottle({ intervalMs: this.options.progressIntervalMs ?? 5000, maxUpdates: Math.max(0, 300 - progress.emitted), emit: (update: ProgressUpdate) => {
+      try {
+        const suffix = update.skipped > 0 ? ` (+${update.skipped} more actions)` : '';
+        let message: string;
+        if (update.kind === 'command') message = `ran ${update.label} (${progress.commandActions} commands so far)`;
+        else if (update.kind === 'edit') message = `edited ${update.label}`;
+        else if (update.kind === 'read') message = `read ${update.label}${suffix}`;
+        else if (update.kind === 'search') message = `searched ${update.label}${suffix}`;
+        else message = `${update.label}${suffix}`;
+        emit(message);
+      } catch { /* progress must never affect the role */ }
+    } });
+    let fileTimer: ReturnType<typeof setInterval> | undefined;
+    let inspecting: Promise<void> | undefined;
+    if (role === 'swe') {
+      fileTimer = setInterval(() => {
+        if (closed || inspecting || progress.emitted >= 300) return;
+        inspecting = (async () => {
+          try {
+            const candidate = await this.deps.git.inspectCandidate(workspace);
+            if (closed) return;
+            const diff = candidate.incremental?.diff ?? candidate.diff;
+            const added = diff.split('\n').filter((line) => line.startsWith('+') && !line.startsWith('+++')).length;
+            const removed = diff.split('\n').filter((line) => line.startsWith('-') && !line.startsWith('---')).length;
+            const next = { changed: (candidate.incremental ?? candidate).paths.length, added, removed };
+            if (!files || files.changed !== next.changed || files.added !== next.added || files.removed !== next.removed) {
+              files = next;
+              emit(`${next.changed} files changed (+${added} −${removed})`);
+            }
+          } catch { /* trusted inspection is best effort */ }
+          finally { inspecting = undefined; }
+        })();
+      }, this.options.fileProgressIntervalMs ?? 30_000);
+      fileTimer.unref?.();
+    }
+    try {
+      return await this.deps.runner.runRole(request, signal, (untrusted) => {
+        try {
+          const parsed = progressUpdateSchema.safeParse(untrusted);
+          if (!parsed.success) return;
+          const actionCount = 1 + parsed.data.skipped;
+          progress.actions += actionCount;
+          if (parsed.data.kind === 'command') progress.commandActions += actionCount;
+          throttle.push(parsed.data, parsed.data.skipped);
+        } catch { /* broken streams and callbacks are non-fatal */ }
+      });
+    } finally {
+      closed = true;
+      throttle.close();
+      if (fileTimer) clearInterval(fileTimer);
+      // Never let a counter's git process overlap the workflow's own git steps after the role (inspect, commit).
+      if (inspecting) await inspecting.catch(() => undefined);
+    }
+  }
   private enterStage(job: Job, stage: WorkflowStage): void {
     this.closeStage(job, 'OK'); this.openStages.set(job.job_id, stage);
     this.jobEvent(job, { type: 'stage_started', stage, repair_round: job.repair_round });
@@ -1567,12 +1637,13 @@ export class WorkflowService implements WorkflowServicePort {
       swe.startDigest = candidate.digest;
     }
     let codes: string[] = []; let resets = new Map<string, string>();
+    const progress: RoleProgressState = { actions: 0, commandActions: 0, emitted: 0 };
     for (let index = 0; index < chain.length; index++) {
       const entry = chain[index]!; const lastInStep = index + 1 >= chain.length;
       const canEscalate = this.canEscalate(job, role); const hasNext = !lastInStep || canEscalate;
       const stageNow = this.openStages.get(job.job_id);
       if (swe) { swe.captured = false; swe.continued = false; }
-      const startedAt = Date.now(); const outcome = await this.runProviderAttempt(job, workspace, role, access, prompt, entry, index, roleConfig.timeout_ms, signal, opts.validate ? (r) => opts.validate!(r, hasNext) : undefined, swe);
+      const startedAt = Date.now(); const outcome = await this.runProviderAttempt(job, workspace, role, access, prompt, entry, index, roleConfig.timeout_ms, signal, opts.validate ? (r) => opts.validate!(r, hasNext) : undefined, swe, progress);
       const sweFlags = swe ? { continued_from_handoff: swe.continued, handoff_captured: swe.captured } : {};
       const tierFields = entry.tier !== null ? { tier: entry.tier, effort: entry.effort ?? null } : {};
       if (outcome.ok) {
@@ -1707,7 +1778,8 @@ export class WorkflowService implements WorkflowServicePort {
       const record = (status: ProviderCall['status'], code: string | null) => this.recordCall({ job_id: job.job_id, role: 'qa', provider: entry.provider, model: entry.model ?? null, chain_index: index, invocation_id: invocationId, started_at: startedAt, elapsed_ms: Date.now() - callClock, status, error_code: code, continued: false, repair_round: job.repair_round, tier: t.tier, effort: entry.effort ?? null, purpose: 'triage' });
       try {
         const paths = await this.deps.artifacts.prepareRole(job.job_id, 'qa', invocationId, prompt);
-        const result = await this.deps.runner.runRole({ job_id: job.job_id, issue_key: job.issue_key, provider: entry.provider, role: 'qa', ...(entry.model ? { model: entry.model } : {}), ...(entry.effort ? { effort: entry.effort } : {}), cwd: workspace.directory, prompt_path: paths.prompt_path, transcript_path: paths.transcript_path, timeout_ms: t.timeout_ms, source_access: 'read', auth_profile: config.providers[entry.provider].auth_profile }, signal);
+        const request = { job_id: job.job_id, issue_key: job.issue_key, provider: entry.provider, role: 'qa' as const, ...(entry.model ? { model: entry.model } : {}), ...(entry.effort ? { effort: entry.effort } : {}), cwd: workspace.directory, prompt_path: paths.prompt_path, transcript_path: paths.transcript_path, timeout_ms: t.timeout_ms, source_access: 'read' as const, auth_profile: config.providers[entry.provider].auth_profile };
+        const result = await this.runRoleWithProgress(job, workspace, 'qa', entry.provider, request, signal);
         if (result.status !== 'SUCCEEDED' || result.exit_code !== 0) {
           const code = result.error_code ?? (result.status === 'TIMED_OUT' ? 'TIMEOUT' : 'TOOL');
           await record(result.status === 'TIMED_OUT' ? 'TIMED_OUT' : result.status === 'CANCELLED' ? 'CANCELLED' : 'FAILED', code);
@@ -1725,7 +1797,7 @@ export class WorkflowService implements WorkflowServicePort {
     }
     return fail(lastCode);
   }
-  private async runProviderAttempt(job: Job, workspace: GitWorkspace, role: 'swe'|'qa'|'reviewer', access: 'read'|'write', prompt: string, entry: ResolvedChainEntry, chainIndex: number, timeoutMs: number, signal: AbortSignal | undefined, validate?: (result: ProviderResult) => void | Promise<void>, swe?: SweState): Promise<{ ok: true; result: ProviderResult } | { ok: false; error: unknown; status?: string }> {
+  private async runProviderAttempt(job: Job, workspace: GitWorkspace, role: 'swe'|'qa'|'reviewer', access: 'read'|'write', prompt: string, entry: ResolvedChainEntry, chainIndex: number, timeoutMs: number, signal: AbortSignal | undefined, validate?: (result: ProviderResult) => void | Promise<void>, swe?: SweState, progress: RoleProgressState = { actions: 0, commandActions: 0, emitted: 0 }): Promise<{ ok: true; result: ProviderResult } | { ok: false; error: unknown; status?: string }> {
     const provider = entry.provider; const providerConfig = this.deps.config.providers[provider];
     const startedAt = Date.now(); let lastStatus: string | undefined;
     const stageNow = this.openStages.get(job.job_id);
@@ -1744,7 +1816,7 @@ export class WorkflowService implements WorkflowServicePort {
           transcript_path: privatePaths.transcript_path, timeout_ms: timeoutMs, source_access: access, auth_profile: providerConfig.auth_profile, ...(this.toolchains.get(job.job_id) ? { toolchain: this.toolchains.get(job.job_id)! } : {}) };
         let result: ProviderResult;
         try {
-          result = await this.deps.runner.runRole(request, signal);
+          result = await this.runRoleWithProgress(job, workspace, role, provider, request, signal, progress);
           if (!(result.status === 'FAILED' && result.error_code === 'UNAVAILABLE')) this.agentStarted.add(job.job_id); // UNAVAILABLE: no session ran
         } catch (error) {
           if (!(error instanceof AutosError && error.code === 'UNAVAILABLE')) this.agentStarted.add(job.job_id);

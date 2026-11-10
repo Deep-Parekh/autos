@@ -3,8 +3,9 @@ import { mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { test } from 'node:test';
-import { AutosError } from '@autos/contracts';
-import type { ProviderRequest } from '@autos/contracts';
+import { createServer as createHttpServer } from 'node:http';
+import { AutosError, formatProgressLine } from '@autos/contracts';
+import type { ProgressUpdate, ProviderRequest, RunnerPort } from '@autos/contracts';
 import { spawnSync } from 'node:child_process';
 import { DockerRunner, DockerRunnerClient, createSupervisorServer, defaultDockerExecutor, shutdownSupervisor } from '@autos/runner';
 import type { DockerExecutor, DockerProcessOptions } from '@autos/runner';
@@ -138,6 +139,37 @@ test('executor output-limit and pre-abort are explicit and pre-abort does not sp
   assert.equal(cancelled.outputLimit, false);
   const limited = await defaultDockerExecutor.run(process.execPath, ['-e', 'process.stdout.write("x".repeat(10000))'], { timeoutMs: 5000, maxOutputBytes: 100 });
   assert.equal(limited.outputLimit, true);
+  const controller = new AbortController();
+  const running = defaultDockerExecutor.run(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { timeoutMs: 5000 }, controller.signal);
+  setTimeout(() => controller.abort(), 40).unref();
+  assert.equal((await running).cancelled, true, 'cancellation terminates the running process');
+});
+
+test('DockerRunner forwards only valid progress, ignores throwing listeners, and keeps progress out of stderr evidence', async () => {
+  const paths = await fixture();
+  class ProgressDocker extends FakeDocker {
+    override async run(binary: string, args: string[], options: DockerProcessOptions) {
+      if (args.includes('worker:test')) {
+        const lines = [formatProgressLine({ kind: 'command', label: 'rg -n', skipped: 0 }), '{"autos_progress":', `{"autos_progress":{"kind":"command","label":"${'x'.repeat(2000)}","skipped":0}}`];
+        for (const line of lines) options.onStderrLine?.(line);
+      }
+      return super.run(binary, args, options);
+    }
+  }
+  const runner = new DockerRunner({ workerImage: 'worker:test', checksImage: 'checks:test', workspaceRoot: paths.workspaceRoot, promptRoot: paths.promptRoot, outputRoot: paths.outputRoot, executor: new ProgressDocker(), testOnly: true });
+  const updates: ProgressUpdate[] = [];
+  try {
+    const result = await runner.runRole(request(paths), undefined, (update) => { updates.push(update); throw new Error('ignored'); });
+    assert.equal(result.status, 'SUCCEEDED');
+    assert.deepEqual(updates, [{ kind: 'command', label: 'rg -n', skipped: 0 }]);
+  } finally { await rm(paths.root, { recursive: true, force: true }); }
+  const seen: string[] = [];
+  const stderr = `ordinary diagnostic\n${formatProgressLine({ kind: 'edit', label: 'src/a.ts', skipped: 2 })}\n`;
+  const childResult = await defaultDockerExecutor.run(process.execPath, ['-e', `process.stderr.write(${JSON.stringify(stderr)})`], { timeoutMs: 5000, onStderrLine: (line) => seen.push(line) });
+  assert.equal(childResult.stderr, 'ordinary diagnostic\n');
+  assert.deepEqual(seen, ['ordinary diagnostic', formatProgressLine({ kind: 'edit', label: 'src/a.ts', skipped: 2 })]);
+  const progressBurst = await defaultDockerExecutor.run(process.execPath, ['-e', `process.stderr.write(${JSON.stringify(`${formatProgressLine({ kind: 'other', label: 'tool', skipped: 0 })}\n`.repeat(1200))})`], { timeoutMs: 5000, maxOutputBytes: 1024 });
+  assert.equal(progressBurst.outputLimit, false, 'progress does not consume the worker output budget');
 });
 
 test('stop discovers labelled containers even when the supervisor has no in-memory job state', async () => {
@@ -179,6 +211,48 @@ test('fixed Unix supervisor RPC reports readiness and translates only approved p
     assert.equal(response.transcript_path, apiRequest.transcript_path);
     await assert.rejects(() => client.runRole({ ...apiRequest, cwd: resolve(paths.root, '..') }), (error: unknown) => error instanceof AutosError);
   } finally { await new Promise<void>((resolvePromise) => server.close(() => resolvePromise())); await rm(paths.root, { recursive: true, force: true }); }
+});
+
+test('supervisor streams validated progress before the final role result', async (t) => {
+  const paths = await fixture();
+  const socketPath = join(paths.root, 'progress.sock');
+  const progress: ProgressUpdate = { kind: 'read', label: 'src/main.ts', skipped: 1 };
+  const runner = {
+    async runRole(req: ProviderRequest, _signal?: AbortSignal, onProgress?: (update: ProgressUpdate) => void) {
+      onProgress?.(progress);
+      return { provider: req.provider, role: req.role, status: 'SUCCEEDED' as const, exit_code: 0, elapsed_ms: 5, transcript_path: req.transcript_path, result: { summary: 'ok' }, ...(req.model ? { model: req.model } : {}) };
+    },
+    async runChecks() { throw new Error('not used'); }, async stop() {}, async health() { return { status: 'ready' as const, version: 1 as const, docker: 'test-only' as const }; },
+  } as RunnerPort;
+  let server: Awaited<ReturnType<typeof createSupervisorServer>>;
+  try { server = await createSupervisorServer({ socketPath, runner, clientRoot: paths.root, hostRoot: paths.root, sweepOnStart: false }); }
+  catch (error) { if (error && typeof error === 'object' && 'code' in error && ['EPERM', 'EACCES'].includes(String(error.code))) { t.skip('environment blocks Unix socket creation'); await rm(paths.root, { recursive: true, force: true }); return; } throw error; }
+  try {
+    const client = new DockerRunnerClient({ socketPath });
+    const updates: ProgressUpdate[] = [];
+    const result = await client.runRole(request(paths), undefined, (update) => updates.push(update));
+    assert.equal(result.status, 'SUCCEEDED');
+    assert.deepEqual(updates, [progress]);
+  } finally { await new Promise<void>((resolvePromise) => server.close(() => resolvePromise())); await rm(paths.root, { recursive: true, force: true }); }
+});
+
+test('supervisor client accepts an older plain-JSON role response despite requesting NDJSON', async (t) => {
+  const paths = await fixture();
+  const socketPath = join(paths.root, 'old-supervisor.sock');
+  const oldServer = createHttpServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as ProviderRequest;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ provider: body.provider, role: body.role, status: 'SUCCEEDED', exit_code: 0, elapsed_ms: 4, transcript_path: body.transcript_path, result: { summary: 'legacy' } }));
+  });
+  try { await new Promise<void>((resolvePromise, reject) => { oldServer.once('error', reject); oldServer.listen(socketPath, resolvePromise); }); }
+  catch (error) { if (error && typeof error === 'object' && 'code' in error && ['EPERM', 'EACCES'].includes(String(error.code))) { t.skip('environment blocks Unix socket creation'); await rm(paths.root, { recursive: true, force: true }); return; } throw error; }
+  try {
+    const result = await new DockerRunnerClient({ socketPath }).runRole(request(paths));
+    assert.equal(result.status, 'SUCCEEDED');
+    assert.deepEqual(result.result, { summary: 'legacy' });
+  } finally { await new Promise<void>((resolvePromise) => oldServer.close(() => resolvePromise())); await rm(paths.root, { recursive: true, force: true }); }
 });
 
 test('concurrent jobs use distinct containers, scratch mounts and per-job stop without single-job assumptions', async () => {

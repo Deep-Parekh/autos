@@ -1,5 +1,7 @@
 # Live agent progress: plan
 
+Status: implemented (chunks 0 and A–D). Tested with fakes; the real-container path still needs a run with rebuilt worker images.
+
 Goal: while an agent runs, `autos watch` (and optionally Teams) shows what it is doing every few seconds, for example:
 ```
 19:46:02 CMS2-1495 swe/codex: ran rg -n "assocType" (12 commands so far)

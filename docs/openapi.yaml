@@ -9444,6 +9444,7 @@ paths:
                             - provider_gate_closed
                             - tier_selected
                             - tier_escalated
+                            - role_progress
                         job_id:
                           type:
                             - string
@@ -9853,6 +9854,7 @@ paths:
                             - provider_gate_closed
                             - tier_selected
                             - tier_escalated
+                            - role_progress
                         job_id:
                           type:
                             - string

@@ -112,7 +112,7 @@ export async function* exportDataset(input: { config: AutosConfig; options: Data
       const dirOk = await realDirectory(jobDir);
       const json = (name: string) => (dirOk ? safeJson(jobDir, name) : Promise.resolve(null));
       const text = (name: string) => (dirOk ? safeRead(jobDir, name) : Promise.resolve(null));
-      const timeline = (db.prepare('SELECT at,type,stage,role,provider,outcome,code FROM job_events WHERE job_id=? ORDER BY event_id').all(jobId) as Row[])
+      const timeline = (db.prepare("SELECT at,type,stage,role,provider,outcome,code FROM job_events WHERE job_id=? AND type <> 'role_progress' ORDER BY event_id").all(jobId) as Row[])
         .map((row) => ({ at: String(row.at), type: String(row.type), stage: str(row.stage), role: str(row.role), provider: str(row.provider), outcome: str(row.outcome), code: str(row.code) }));
       const record = {
         schema_version: 1, exported_at: exportedAt, job_id: jobId, issue_key: issueKey, revision: Number(job.revision ?? 0), parent_job_id: str(job.parent_job_id),

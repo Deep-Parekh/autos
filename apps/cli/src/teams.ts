@@ -26,6 +26,8 @@ export function parseTeamsWebhookUrl(raw: string | undefined, envName: string): 
 
 /** Which notification an event is, or null for events the relay never posts. */
 export function notificationKind(event: JobEvent): TeamsNotifyKind | null {
+  // Progress has its own relay path and must never fall through to a lifecycle card.
+  if (event.type === 'role_progress') return 'AGENT_PROGRESS';
   if (event.type === 'job_finished' && event.state && ['READY_FOR_HUMAN', 'BLOCKED', 'CANCELLED', 'PLANNED'].includes(event.state)) return event.state as TeamsNotifyKind;
   if (event.type === 'job_paused') return 'PAUSED';
   if (event.type === 'tier_escalated') return 'TIER_ESCALATED';
@@ -56,6 +58,7 @@ export interface CardFacts { job?: JobRecord | null; tier?: { start: string; cur
 export function buildTeamsMessage(event: JobEvent, kind: TeamsNotifyKind, facts: CardFacts, config: Pick<AutosConfig, 'jira'> & { notifications?: AutosConfig['notifications'] }): Record<string, unknown> {
   const key = event.issue_key; const job = facts.job ?? null; const jobId = event.job_id;
   const titles: Record<TeamsNotifyKind, [string, string]> = {
+    AGENT_PROGRESS: [`⚙ ${key ?? 'Job'} is running`, 'Accent'],
     READY_FOR_HUMAN: [`✅ ${key} is ready for review`, 'Good'],
     BLOCKED: [`⛔ ${key} is blocked${event.code ? ` (${event.code})` : ''}`, 'Attention'],
     CANCELLED: [`✖ ${key} was cancelled`, 'Default'],
@@ -90,6 +93,20 @@ export function buildTeamsMessage(event: JobEvent, kind: TeamsNotifyKind, facts:
   }
   const actions = key ? [{ type: 'Action.OpenUrl', title: `Open ${key} in Jira`, url: new URL(`browse/${key}`, config.jira.site_url).toString() }] : [];
   return adaptiveCard({ title, color, at: event.at, facts: factList, commands, actions });
+}
+
+/** Progress card: only the already-sanitized action label from a role_progress event is displayed. */
+export function buildAgentProgressMessage(event: JobEvent, elapsedMs?: number): Record<string, unknown> {
+  const roleProvider = [event.role, event.provider].filter(Boolean).join('/');
+  const facts: Array<{ title: string; value: string }> = [];
+  if (roleProvider) facts.push({ title: 'Role', value: text(roleProvider) });
+  if (event.message) facts.push({ title: 'Latest action', value: text(event.message) });
+  if (elapsedMs !== undefined && Number.isFinite(elapsedMs)) {
+    const seconds = Math.max(0, Math.floor(elapsedMs / 1000));
+    const elapsed = seconds < 60 ? `${seconds}s` : duration(elapsedMs);
+    facts.push({ title: 'Elapsed', value: `running ${elapsed}` });
+  }
+  return adaptiveCard({ title: `⚙ ${text(event.issue_key ?? 'Job', 80)}${roleProvider ? ` · ${text(roleProvider, 40)}` : ''}`, color: 'Accent', at: event.at, facts });
 }
 
 interface CardParts { title: string; color: string; at: string; facts: Array<{ title: string; value: string }>; commands?: string[]; actions?: unknown[] }

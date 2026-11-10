@@ -153,12 +153,17 @@ describe('call.json per provider attempt', () => {
 describe('exportDataset', () => {
   it('exports a real run with calls, artifacts and timeline, all validating', async () => {
     const job = await run(newScript());
+    const db = new DatabaseSync(join(config.storage.data_dir, 'autos.sqlite'));
+    db.prepare("INSERT INTO job_events(at,type,job_id,issue_key,role,provider,count,message) VALUES(?,?,?,?,?,?,?,?)")
+      .run('2026-11-08T00:00:00.000Z', 'role_progress', job.job_id, job.issue_key, 'swe', 'claude', 1, 'edited src/Fix.java');
+    db.close();
     const [record] = await collect(); assert.ok(record);
     assert.equal(datasetRecordSchema.safeParse(record).success, true);
     assert.equal(record.job_id, job.job_id); assert.equal(record.outcome, 'awaiting_review'); assert.equal(record.final_state, 'READY_FOR_HUMAN'); assert.equal(record.exported_at, '2026-11-08T00:00:00.000Z');
     assert.deepEqual(record.calls.map((c) => c.role), ['swe', 'qa', 'reviewer']); assert.ok(record.calls.every((c) => c.call !== null && c.prompt && c.transcript === null && !c.transcript_truncated));
     assert.ok(record.issue && record.rounds && record.checks && record.qa && record.review && record.final_diff);
     assert.ok(record.timeline.some((e) => e.type === 'role_started' && e.role === 'swe'));
+    assert.ok(record.timeline.every((e) => e.type !== 'role_progress'));
   });
 
   it('classifies outcomes, skips dry runs and active/planned jobs, and attaches revision feedback', async () => {

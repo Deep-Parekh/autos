@@ -90,9 +90,9 @@ beforeEach(async () => {
 });
 afterEach(async () => rm(root, { recursive: true, force: true }));
 
-const open = (script: Script, file = 'jobs.sqlite', listen = true) => {
+const open = (script: Script, file = 'jobs.sqlite', listen = true, options: ConstructorParameters<typeof WorkflowService>[1] = {}) => {
   const store = new SqliteJobStore(join(root, file)); const artifacts = new FileArtifactStore(config.storage.artifacts_dir);
-  const service = new WorkflowService(deps(script, store, artifacts)); const seen: JobEvent[] = [];
+  const service = new WorkflowService(deps(script, store, artifacts), options); const seen: JobEvent[] = [];
   if (listen) service.subscribe((e) => seen.push(e));
   return { store, artifacts, service, seen };
 };
@@ -100,6 +100,53 @@ const all = async (service: WorkflowService, job_id?: string) => service.events(
 const assertMonotonic = (events: JobEvent[]) => { for (let i = 1; i < events.length; i++) assert.ok(events[i]!.event_id > events[i - 1]!.event_id); };
 
 describe('progress events', () => {
+  it('throttles streamed actions, reports cumulative counts, and closes before role_finished', async () => {
+    const script = newScript(['SAMPLE-91']); const { store } = open(script, 'progress.sqlite', true, { progressIntervalMs: 5 });
+    const d = deps(script, store, new FileArtifactStore(config.storage.artifacts_dir)); const original = d.runner.runRole.bind(d.runner);
+    d.runner.runRole = async (req, signal, onProgress) => {
+      if (req.role === 'swe') {
+        for (let i = 0; i < 40; i++) onProgress?.({ kind: 'command', label: `rg -n ${i}`, skipped: 0 });
+        await new Promise((resolve) => setTimeout(resolve, 14));
+      }
+      return original(req, signal, onProgress);
+    };
+    const service2 = new WorkflowService(d, { progressIntervalMs: 5 });
+    const job = await service2.execute((await service2.submit('SAMPLE-91', false)).job_id);
+    assert.equal(job.state, 'READY_FOR_HUMAN');
+    const events = await all(service2, job.job_id); const sweEvents = events.filter((e) => e.type === 'role_progress' && e.role === 'swe');
+    assert.ok(sweEvents.length > 0 && sweEvents.length < 40);
+    assert.ok(sweEvents.some((e) => e.count === 40));
+    const finished = events.findIndex((e) => e.type === 'role_finished' && e.role === 'swe');
+    assert.ok(sweEvents.every((e) => events.indexOf(e) < finished));
+    assert.match(sweEvents[0]!.message ?? '', /ran rg -n \d+ \(\d+ commands so far\)/);
+    store.close();
+  });
+
+  it('emits trusted file counts only when changed and ignores inspection failures', async () => {
+    const script = newScript(['SAMPLE-92']); const dStore = new SqliteJobStore(join(root, 'files.sqlite'));
+    const d = deps(script, dStore, new FileArtifactStore(config.storage.artifacts_dir)); const originalInspect = d.git.inspectCandidate.bind(d.git);
+    let call = 0; let sweActive = false;
+    d.git.inspectCandidate = async (...args) => {
+      call++;
+      if (sweActive && call % 2 === 0) throw new Error('mid-write');
+      if (sweActive) await new Promise((resolve) => setTimeout(resolve, 8));
+      const c = await originalInspect(...args);
+      return { ...c, diff: '+one\n-two' };
+    };
+    const original = d.runner.runRole.bind(d.runner);
+    d.runner.runRole = async (req, signal, onProgress) => {
+      if (req.role === 'swe') { sweActive = true; try { await new Promise((resolve) => setTimeout(resolve, 30)); return await original(req, signal, onProgress); } finally { sweActive = false; } }
+      return original(req, signal, onProgress);
+    };
+    const service = new WorkflowService(d, { fileProgressIntervalMs: 3 });
+    const job = await service.execute((await service.submit('SAMPLE-92', false)).job_id);
+    assert.equal(job.state, 'READY_FOR_HUMAN');
+    const fileEvents = (await all(service, job.job_id)).filter((e) => e.type === 'role_progress' && /files changed/.test(e.message ?? ''));
+    assert.equal(fileEvents.length, 1);
+    assert.match(fileEvents[0]!.message ?? '', /^1 files changed \(\+1 −1\)$/);
+    dStore.close();
+  });
+
   it('records an ordered sequence for a dry run and sets base_branch', async () => {
     const script = newScript(['SAMPLE-1']); const { service, store, seen } = open(script);
     const job = await service.execute((await service.submit('SAMPLE-1', true)).job_id);

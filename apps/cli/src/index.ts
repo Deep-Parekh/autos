@@ -9,7 +9,7 @@ import type { OperatorNoteRequest, WorkflowServicePort } from '@autos/contracts'
 import type { ControllerOptions, LoopStatus, ProviderDiagnostic, StatusResponse } from '@autos/controller';
 import { pollDelayMs, runControllerLoop, waitForSignalOrTimeout, type LoopSleep } from './loop.js';
 import { deepChecks, formatChecks, type CheckResult, type DeepDoctorDeps } from './deep-doctor.js';
-import { buildLifecycleMessage, buildTeamsMessage, cursorPath, EntraTokenSource, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, readRelayState, TierTracker, writeRelayState, type FetchLike, type LifecycleFacts } from './teams.js';
+import { buildAgentProgressMessage, buildLifecycleMessage, buildTeamsMessage, cursorPath, EntraTokenSource, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, readRelayState, TierTracker, writeRelayState, type FetchLike, type LifecycleFacts } from './teams.js';
 
 export interface CliRuntime extends Omit<ControllerOptions, 'operatorToken' | 'fastifyOptions' | 'bindHost'> {
   testProviders(): Promise<ProviderDiagnostic[]>;
@@ -39,6 +39,8 @@ export interface CliDependencies {
   now?(): number;
   /** Test seams for `autos teams`: the webhook HTTP client and the delivery retry base delay. */
   teamsFetch?: FetchLike;
+  /** Test seam for controller API/SSE calls; production uses global fetch. */
+  controllerFetch?: FetchLike;
   teamsRetryDelayMs?: number;
   /** How long the controller must stay unreachable before the relay posts an AUTOS_DOWN card (default 15 s). */
   teamsDownAfterMs?: number;
@@ -103,7 +105,7 @@ Commands:
   retry --all-blocked [--code CODE]  Queue a new attempt for every blocked job without a newer attempt
   queue list [--limit N]          List recent jobs
   status [--url URL]              Show live controller, runner, and job activity (needs running controller)
-  watch [--job JOB_ID] [--url URL]  Follow progress events live (Ctrl-C to stop)
+  watch [--job JOB_ID] [--quiet-progress] [--url URL]  Follow progress events live (Ctrl-C to stop)
   teams relay [--from-start] [--url URL]  Post READY/BLOCKED/PAUSED and Autos up/down cards to Teams (notifications.teams;
                                   needs running controller; resumes after the last posted event; Ctrl-C to stop)
   teams test                      Post one test card to the configured Teams webhook
@@ -278,17 +280,19 @@ async function docsSpecPath(cwd: string): Promise<string> {
 
 // ---- Operator monitoring: thin HTTP clients of the running controller ----
 
-interface MonitorOptions { url?: string; job?: string; after?: number; limit?: number }
+interface MonitorOptions { url?: string; job?: string; after?: number; limit?: number; quietProgress?: boolean }
 const ISSUE_KEY = /^[A-Z][A-Z0-9]*-[1-9][0-9]*$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseMonitorArgs(command: string, args: string[]): MonitorOptions {
-  const allowed: Record<string, string[]> = { status: ['--url'], watch: ['--url', '--job'], events: ['--url', '--job', '--after', '--limit'] };
+  const allowed: Record<string, string[]> = { status: ['--url'], watch: ['--url', '--job', '--quiet-progress'], events: ['--url', '--job', '--after', '--limit'] };
   const result: MonitorOptions = {};
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
+    if (!allowed[command]!.includes(flag)) throw new AutosError('INVALID_INPUT', `Usage: autos ${command} ${allowed[command]!.map((name) => name === '--quiet-progress' ? '[--quiet-progress]' : `[${name} VALUE]`).join(' ')}`);
+    if (flag === '--quiet-progress') { result.quietProgress = true; continue; }
     const value = args[++index];
-    if (!allowed[command]!.includes(flag) || value === undefined || value.startsWith('--')) throw new AutosError('INVALID_INPUT', `Usage: autos ${command} ${allowed[command]!.map((name) => `[${name} VALUE]`).join(' ')}`);
+    if (value === undefined || value.startsWith('--')) throw new AutosError('INVALID_INPUT', `Usage: autos ${command} ${allowed[command]!.map((name) => name === '--quiet-progress' ? '[--quiet-progress]' : `[${name} VALUE]`).join(' ')}`);
     if (flag === '--url') result.url = value;
     else if (flag === '--job') { if (!UUID.test(value)) throw new AutosError('INVALID_INPUT', '--job must be a job UUID'); result.job = value; }
     else if (flag === '--after') { if (!/^[0-9]{1,15}$/.test(value)) throw new AutosError('INVALID_INPUT', '--after must be a non-negative integer'); result.after = Number(value); }
@@ -330,9 +334,9 @@ function httpFailure(status: number): AutosError {
  * unknown tier or a step below the floor). The message is controller-authored; it is length-capped and stripped of control
  * characters, and any other status still maps to the generic failures.
  */
-async function controllerFetch(url: URL, token: string, init: { signal?: AbortSignal; headers?: Record<string, string>; method?: string; body?: string; reason?: boolean } = {}): Promise<Response> {
+async function controllerFetch(url: URL, token: string, init: { signal?: AbortSignal; headers?: Record<string, string>; method?: string; body?: string; reason?: boolean } = {}, fetcher: FetchLike = (input, request) => fetch(input, request)): Promise<Response> {
   let response: Response;
-  try { response = await fetch(url, { signal: init.signal ?? null, method: init.method ?? 'GET', ...(init.body !== undefined ? { body: init.body } : {}), headers: { authorization: `Bearer ${token}`, ...init.headers } }); }
+  try { response = await fetcher(url, { signal: init.signal ?? null, method: init.method ?? 'GET', ...(init.body !== undefined ? { body: init.body } : {}), headers: { authorization: `Bearer ${token}`, ...init.headers } }); }
   catch (error) { if (init.signal?.aborted) throw error; throw unreachable(); }
   if (!response.ok) {
     if (response.status === 409) {
@@ -352,8 +356,8 @@ async function controllerFetch(url: URL, token: string, init: { signal?: AbortSi
   return response;
 }
 
-async function controllerJson(url: URL, token: string, init: Parameters<typeof controllerFetch>[2] = {}): Promise<unknown> {
-  const response = await controllerFetch(url, token, init);
+async function controllerJson(url: URL, token: string, init: Parameters<typeof controllerFetch>[2] = {}, fetcher?: FetchLike): Promise<unknown> {
+  const response = await controllerFetch(url, token, init, fetcher);
   try { return await response.json(); } catch { throw new AutosError('UPSTREAM', 'Controller returned an unreadable response'); }
 }
 
@@ -365,6 +369,11 @@ function formatDuration(seconds: number): string {
 
 /** One compact, secret-free line per event, for `autos watch` and `autos events`. */
 export function formatEvent(event: JobEvent): string {
+  if (event.type === 'role_progress') {
+    const who = [event.role, event.provider].filter(Boolean).join('/');
+    // The workflow already puts any running count into the message.
+    return `${event.at.slice(11, 19)} ${event.issue_key ?? 'service'}${who ? ` ${who}` : ''}: ${event.message ?? 'agent progress'}`;
+  }
   if (event.type === 'provider_fallback') {
     // `provider` is the provider the role moves to; `from_provider` is the one that failed.
     const role = event.role ? (event.role === 'swe' ? 'SWE' : event.role === 'qa' ? 'QA' : 'Reviewer') : 'Role';
@@ -401,7 +410,7 @@ export function formatEvent(event: JobEvent): string {
   return parts.join(' ');
 }
 
-export function formatStatus(status: StatusResponse, now = Date.now()): string {
+export function formatStatus(status: StatusResponse, now = Date.now(), lastProgress: ReadonlyMap<string, JobEvent> = new Map()): string {
   const { controller, runner, activity } = status;
   const lines: string[] = [];
   const loop = controller.poll_loop;
@@ -425,6 +434,11 @@ export function formatStatus(status: StatusResponse, now = Date.now()): string {
       const who = active.role ? ` ${active.role}${active.provider ? `/${active.provider}` : ''}` : '';
       const elapsed = [active.active_elapsed_s !== undefined ? `job ${formatDuration(active.active_elapsed_s)}` : '', active.stage_elapsed_s !== undefined ? `stage ${formatDuration(active.stage_elapsed_s)}` : ''].filter(Boolean).join(', ');
       lines.push(`Active: ${active.issue_key} ${active.state}${active.stage ? ` stage=${active.stage}` : ''}${who} round ${active.repair_round}${active.dry_run ? ' (dry run)' : ''}${elapsed ? `  elapsed ${elapsed}` : ''}`);
+      const progress = lastProgress.get(active.job_id);
+      if (progress?.message) {
+        const age = Math.max(0, Math.floor((now - Date.parse(progress.at)) / 1000));
+        lines.push(`  Last action: ${progress.message} (${formatDuration(age)} ago)`);
+      }
     }
   } else lines.push('Active: idle (no job running)');
   const limits = activity.provider_limits;
@@ -476,7 +490,7 @@ async function watchEvents(base: URL, token: string, options: MonitorOptions, js
   try {
     while (!abort.signal.aborted) {
       try {
-        const response = await controllerFetch(endpoint(base, '/v1/events/stream', { job_id: options.job, after: cursor }), token, { signal: abort.signal, headers: { accept: 'text/event-stream', ...(cursor !== undefined ? { 'last-event-id': String(cursor) } : {}) } });
+        const response = await controllerFetch(endpoint(base, '/v1/events/stream', { job_id: options.job, after: cursor }), token, { signal: abort.signal, headers: { accept: 'text/event-stream', ...(cursor !== undefined ? { 'last-event-id': String(cursor) } : {}) } }, dependencies.controllerFetch);
         if (!response.body) throw unreachable();
         everConnected = true; attempts = 0;
         const parse = createSseParser((message) => {
@@ -484,7 +498,7 @@ async function watchEvents(base: URL, token: string, options: MonitorOptions, js
           const event = jobEventSchema.safeParse(value);
           if (!event.success) return;
           cursor = event.data.event_id;
-          stdout(json ? JSON.stringify(event.data) : formatEvent(event.data));
+          if (!options.quietProgress || event.data.type !== 'role_progress') stdout(json ? JSON.stringify(event.data) : formatEvent(event.data));
         });
         const decoder = new TextDecoder();
         for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) parse(decoder.decode(chunk, { stream: true }));
@@ -541,18 +555,20 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
   let announced = saved.announcedControllerStart;
   const save = () => writeRelayState(cursorFile, { lastEventId: cursor ?? 0, announcedControllerStart: announced });
   if (cursor === null) {
-    const status = await controllerJson(endpoint(base, '/v1/status'), token);
+    const status = await controllerJson(endpoint(base, '/v1/status'), token, {}, dependencies.controllerFetch);
     const last = isRecord(status) && isRecord(status.activity) && Number.isSafeInteger(status.activity.last_event_id) ? status.activity.last_event_id as number : 0;
     cursor = last; await save();
   }
   const wanted = new Set(teams.notify); const tiers = new TierTracker();
+  const progressPostedAt = new Map<string, number>();
+  const roleStartedAt = new Map<string, number>();
   const now = () => dependencies.now?.() ?? Date.now(); const iso = (ms: number) => new Date(ms).toISOString();
   const downAfterMs = dependencies.teamsDownAfterMs ?? 15_000;
   let disconnectedAt: number | null = null; let downPosted = false;
   /** Controller facts for an up card; null when status cannot be read (the card then goes out without them). */
   const controllerFacts = async (): Promise<Omit<LifecycleFacts, 'variant'> | null> => {
     try {
-      const status = await controllerJson(endpoint(base, '/v1/status'), token, { signal: abort.signal });
+      const status = await controllerJson(endpoint(base, '/v1/status'), token, { signal: abort.signal }, dependencies.controllerFetch);
       if (!isRecord(status)) return null;
       const controller = isRecord(status.controller) ? status.controller : {}; const activity = isRecord(status.activity) ? status.activity : {};
       const loop = isRecord(controller.poll_loop) ? controller.poll_loop : {}; const counts = isRecord(activity.counts) ? activity.counts : {};
@@ -593,10 +609,20 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
   const handle = async (event: JobEvent): Promise<void> => {
     tiers.observe(event);
     const kind = notificationKind(event);
-    if (kind && wanted.has(kind)) {
+    if (event.job_id && event.type === 'role_started') roleStartedAt.set(event.job_id, Date.parse(event.at));
+    if (event.type === 'role_progress' && wanted.has('AGENT_PROGRESS') && event.job_id) {
+      const last = progressPostedAt.get(event.job_id);
+      if (last === undefined || now() - last >= 10 * 60_000) {
+        progressPostedAt.set(event.job_id, now());
+        const started = roleStartedAt.get(event.job_id);
+        const elapsed = started !== undefined && Number.isFinite(started) ? Math.max(0, Date.parse(event.at) - started) : undefined;
+        const result = await postTeamsMessage(webhook, shape(buildAgentProgressMessage(event, elapsed)), { ...delivery, signal: abort.signal });
+        log(result.ok ? { event: 'teams_notified', kind: 'AGENT_PROGRESS', issue_key: event.issue_key, event_id: event.event_id } : { event: 'teams_delivery_failed', kind: 'AGENT_PROGRESS', issue_key: event.issue_key, event_id: event.event_id, status: result.status, ...(hint(result.status) ? { hint: hint(result.status).trim() } : {}) });
+      }
+    } else if (kind && kind !== 'AGENT_PROGRESS' && wanted.has(kind)) {
       let job: JobRecord | null = null;
       if (event.job_id && kind !== 'PROVIDER_GATE') {
-        try { const parsedJob = jobRecordSchema.safeParse(await controllerJson(endpoint(base, `/v1/jobs/${event.job_id}`), token, { signal: abort.signal })); job = parsedJob.success ? parsedJob.data as JobRecord : null; }
+        try { const parsedJob = jobRecordSchema.safeParse(await controllerJson(endpoint(base, `/v1/jobs/${event.job_id}`), token, { signal: abort.signal }, dependencies.controllerFetch)); job = parsedJob.success ? parsedJob.data as JobRecord : null; }
         catch (error) { if (abort.signal.aborted) throw error; job = null; } // the card still goes out with the event's own facts
       }
       const result = await postTeamsMessage(webhook, shape(buildTeamsMessage(event, kind, { job, tier: tiers.get(event.job_id) }, config)), { ...delivery, signal: abort.signal });
@@ -604,14 +630,14 @@ async function teamsCommand(args: string[], config: AutosConfig, json: boolean, 
       // delivery cannot stall every later notification.
       log(result.ok ? { event: 'teams_notified', kind, issue_key: event.issue_key, event_id: event.event_id } : { event: 'teams_delivery_failed', kind, issue_key: event.issue_key, event_id: event.event_id, status: result.status, ...(hint(result.status) ? { hint: hint(result.status).trim() } : {}) });
     }
-    if (event.type === 'job_finished') tiers.forget(event.job_id);
+    if (event.type === 'job_finished') { tiers.forget(event.job_id); if (event.job_id) { roleStartedAt.delete(event.job_id); progressPostedAt.delete(event.job_id); } }
     cursor = event.event_id; await save();
   };
   let attempts = 0; let everConnected = false;
   try {
     while (!abort.signal.aborted) {
       try {
-        const response = await controllerFetch(endpoint(base, '/v1/events/stream', { after: cursor }), token, { signal: abort.signal, headers: { accept: 'text/event-stream', 'last-event-id': String(cursor) } });
+        const response = await controllerFetch(endpoint(base, '/v1/events/stream', { after: cursor }), token, { signal: abort.signal, headers: { accept: 'text/event-stream', 'last-event-id': String(cursor) } }, dependencies.controllerFetch);
         if (!response.body) throw unreachable();
         everConnected = true; attempts = 0;
         await connected();
@@ -649,14 +675,42 @@ async function monitorCommand(args: string[], config: AutosConfig, json: boolean
   if (!token) throw new AutosError('INVALID_CONFIG', `Operator token environment variable ${config.api.operator_token_env} must be set to call the controller`);
   const base = controllerBase(config, options.url);
   if (command === 'status') {
-    const body = await controllerJson(endpoint(base, '/v1/status'), token);
+    const body = await controllerJson(endpoint(base, '/v1/status'), token, {}, dependencies.controllerFetch);
     if (!isRecord(body) || !isRecord(body.controller) || !isRecord(body.activity)) throw new AutosError('UPSTREAM', 'Controller returned an unexpected status response');
-    stdout(json ? JSON.stringify(body, null, 2) : formatStatus(body as unknown as StatusResponse));
+    const parsedStatus = body as unknown as StatusResponse;
+    const progress = new Map<string, JobEvent>();
+    // Status already identifies active jobs; use the existing persisted events API to fetch their latest progress.
+    // Pagination is bounded by the controller's 500-event page size and stops as soon as a short page is returned.
+    for (const active of parsedStatus.active_jobs ?? []) {
+      let after = 0;
+      try {
+        for (;;) {
+          const eventsBody = await controllerJson(endpoint(base, `/v1/jobs/${active.job_id}/events`, { after, limit: 500 }), token, {}, dependencies.controllerFetch);
+          if (!isRecord(eventsBody) || !Array.isArray(eventsBody.events)) break;
+          const parsed = eventsBody.events.map((item) => jobEventSchema.safeParse(item));
+          if (parsed.some((item) => !item.success)) break;
+          const page = parsed.map((item) => (item as { data: JobEvent }).data);
+          for (const event of page) if (event.type === 'role_progress') progress.set(active.job_id, event);
+          if (page.length < 500) break;
+          const next = eventsBody.next_after;
+          if (typeof next !== 'number' || next <= after) break;
+          after = next;
+        }
+      } catch { /* recent progress is best effort; status remains available if the events request fails */ }
+    }
+    if (json) {
+      const enriched = { ...body, active_jobs: parsedStatus.active_jobs.map((active) => {
+        const event = progress.get(active.job_id);
+        return { ...active, last_progress: event ? { message: event.message, at: event.at, age_s: Math.max(0, Math.floor(((dependencies.now?.() ?? Date.now()) - Date.parse(event.at)) / 1000)) } : null };
+      }) };
+      stdout(JSON.stringify(enriched, null, 2));
+    }
+    else stdout(formatStatus(parsedStatus, dependencies.now?.() ?? Date.now(), progress));
     return 0;
   }
   if (command === 'events') {
     const path = options.job ? `/v1/jobs/${options.job}/events` : '/v1/events';
-    const body = await controllerJson(endpoint(base, path, { after: options.after, limit: options.limit }), token);
+    const body = await controllerJson(endpoint(base, path, { after: options.after, limit: options.limit }), token, {}, dependencies.controllerFetch);
     const events = isRecord(body) && Array.isArray(body.events) ? body.events.map((item) => jobEventSchema.safeParse(item)) : null;
     if (!events || events.some((item) => !item.success)) throw new AutosError('UPSTREAM', 'Controller returned an unexpected events response');
     const parsedEvents = events.map((item) => (item as { data: JobEvent }).data);

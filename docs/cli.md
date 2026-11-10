@@ -26,7 +26,7 @@ autos jobs cancel JOB_ID [--config PATH]
 autos queue list [--limit 1..100] [--config PATH]
 autos controller start [--config PATH]
 autos status [--url URL] [--json] [--config PATH]
-autos watch [--job JOB_ID] [--url URL] [--json] [--config PATH]
+autos watch [--job JOB_ID] [--quiet-progress] [--url URL] [--json] [--config PATH]
 autos teams relay [--from-start] [--url URL] [--config PATH]
 autos teams test [--config PATH]
 autos events [--job JOB_ID] [--after N] [--limit 1..500] [--url URL] [--json] [--config PATH]
@@ -83,6 +83,8 @@ Exit code is non-zero when any check is FAIL or the base checks fail. Text mode 
 ## Logging
 
 `controller start` writes structured JSON log lines to stderr: one line per request (`request_id`, `method`, route pattern, `status`, `duration_ms`), `auth_rejected` for a rejected token (the presented token is never logged), and `audit` lines for job submit, revise, cancel, retry, issue close, workspace prune and tier pin set/clear (ids, counts, resolution, role, tier and effort only) with job id, issue key and the actor label (`X-Autos-Operator`, default `operator`). Headers, bodies, tokens, query strings and operator note text are never logged. See [api-publishing.md](api-publishing.md).
+
+`autos watch` prints live agent actions from `role_progress` events, for example `19:46:02 CMS2-1495 swe/codex: ran rg -n assocType (12 commands so far)`. Use `--quiet-progress` to hide these frequent action lines while keeping stage and job events. `autos status` adds the latest action and its age under each active job when one has been recorded.
 
 ## Provider fallbacks
 

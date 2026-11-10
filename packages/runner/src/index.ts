@@ -4,16 +4,17 @@ import { chmod, chown, lstat, mkdir, mkdtemp, readFile, readdir, realpath, renam
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createConnection } from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 import { createServer, request as httpRequest } from 'node:http';
 import type { Server } from 'node:http';
-import { AutosError, ERROR_CODES, TOOLCHAIN_MOUNTS, branchNameSchema, checkCommandSchema, checksSchema, digestSchema, gitShaSchema, installedToolchainsSchema, issueKeySchema, jdkVersionSchema, jobIdSchema, providerRequestSchema, providerResultSchema, toolchainSelectionSchema, tomcatVersionSchema } from '@autos/contracts';
-import type { CheckCommand, Checks, GitWorkspace, InstalledToolchains, ProviderAuthSummary, ProviderRequest, ProviderResult, RunChecksOptions, RunnerHealth, RunnerPort, ToolchainSelection } from '@autos/contracts';
+import { AutosError, ERROR_CODES, TOOLCHAIN_MOUNTS, branchNameSchema, checkCommandSchema, checksSchema, digestSchema, gitShaSchema, installedToolchainsSchema, issueKeySchema, jdkVersionSchema, jobIdSchema, parseProgressLine, progressUpdateSchema, providerRequestSchema, providerResultSchema, toolchainSelectionSchema, tomcatVersionSchema } from '@autos/contracts';
+import type { CheckCommand, Checks, GitWorkspace, InstalledToolchains, ProgressUpdate, ProviderAuthSummary, ProviderRequest, ProviderResult, RunChecksOptions, RunnerHealth, RunnerPort, ToolchainSelection } from '@autos/contracts';
 import { CODEX_AUTH_FILE, CODEX_STAGED_CONFIG, readCodexAuthFile, validateCodexAuthDirectory, validateCodexAuthJson, validateProviderAuthProfile } from './auth.js';
 import type { ProviderAuthProfile } from './auth.js';
 
 export * from './auth.js';
 
-export interface DockerProcessOptions { timeoutMs: number; maxOutputBytes?: number; killGraceMs?: number }
+export interface DockerProcessOptions { timeoutMs: number; maxOutputBytes?: number; killGraceMs?: number; onStderrLine?: (line: string) => void }
 export interface DockerProcessResult { code: number | null; stdout: string; stderr: string; timedOut: boolean; cancelled: boolean; outputLimit: boolean }
 export interface DockerExecutor {
   run(binary: string, args: string[], options: DockerProcessOptions, signal?: AbortSignal): Promise<DockerProcessResult>;
@@ -214,6 +215,8 @@ export const defaultDockerExecutor: DockerExecutor = {
       let child: ReturnType<typeof spawn>;
       let stdout = '';
       let stderr = '';
+      let stderrPending = '';
+      const stderrDecoder = new StringDecoder('utf8');
       let bytes = 0;
       let timedOut = false;
       let cancelled = false;
@@ -260,14 +263,44 @@ export const defaultDockerExecutor: DockerExecutor = {
       timer = setTimeout(() => stop('timeout'), options.timeoutMs);
       signal?.addEventListener('abort', onAbort, { once: true });
       const collect = (target: 'stdout' | 'stderr') => (chunk: Buffer) => {
-        bytes += chunk.byteLength;
-        if (bytes > outputLimit) { stop('output'); return; }
-        if (target === 'stdout') stdout += chunk.toString('utf8'); else stderr += chunk.toString('utf8');
+        const text = target === 'stderr' ? stderrDecoder.write(chunk) : chunk.toString('utf8');
+        if (target === 'stdout') {
+          bytes += chunk.byteLength;
+          if (bytes > outputLimit) { stop('output'); return; }
+          stdout += text; return;
+        }
+        stderrPending += text;
+        let newline: number;
+        while ((newline = stderrPending.indexOf('\n')) >= 0) {
+          const rawLine = stderrPending.slice(0, newline);
+          const line = rawLine.replace(/\r$/, '');
+          stderrPending = stderrPending.slice(newline + 1);
+          try { options.onStderrLine?.(line); } catch { /* progress listeners are best effort */ }
+          if (parseProgressLine(line) === null) {
+            bytes += Buffer.byteLength(rawLine, 'utf8') + 1;
+            if (bytes > outputLimit) { stop('output'); return; }
+            stderr += `${rawLine}\n`;
+          }
+        }
       };
       child.stdout?.on('data', collect('stdout'));
       child.stderr?.on('data', collect('stderr'));
-      child.on('error', () => finish(null));
-      child.on('close', (code) => { if (escalation) clearTimeout(escalation); void cleanupGroup().finally(() => finish(code)); });
+      child.on('error', () => { stderr += stderrPending; stderrPending = ''; finish(null); });
+      child.on('close', (code) => {
+        if (stderrPending) {
+          const decodedTail = stderrDecoder.end();
+          stderrPending += decodedTail;
+          const line = stderrPending.replace(/\r$/, '');
+          try { options.onStderrLine?.(line); } catch { /* progress listeners are best effort */ }
+          if (parseProgressLine(line) === null) {
+            bytes += Buffer.byteLength(stderrPending, 'utf8');
+            if (bytes > outputLimit) stop('output');
+            else stderr += stderrPending;
+          }
+          stderrPending = '';
+        }
+        if (escalation) clearTimeout(escalation); void cleanupGroup().finally(() => finish(code));
+      });
       if (signal?.aborted) onAbort();
     });
   },
@@ -346,7 +379,7 @@ export class DockerRunner implements RunnerPort {
     this.limits = { ...defaultLimits, ...options.limits };
   }
 
-  async runRole(untrustedRequest: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> {
+  async runRole(untrustedRequest: ProviderRequest, signal?: AbortSignal, onProgress?: (update: ProgressUpdate) => void): Promise<ProviderResult> {
     const request = providerRequestSchema.parse(untrustedRequest);
     if ((request.role === 'swe' && request.source_access !== 'write') || (request.role !== 'swe' && request.source_access !== 'read')) throw new AutosError('POLICY', 'Runner role and source permissions do not match');
     const [workspaceRoot, promptRoot, outputRoot, cwd, prompt] = await Promise.all([
@@ -431,7 +464,16 @@ export class DockerRunner implements RunnerPort {
         '--prompt', '/run/autos/prompt.txt', '--transcript', `/run/autos/output/${request.transcript_path.split(sep).at(-1)}`,
       ];
       try {
-        const result = await this.executor.run(this.options.dockerBinary ?? 'docker', args, { timeoutMs: request.timeout_ms, maxOutputBytes: this.limits.maxOutputBytes, killGraceMs: this.limits.killGraceMs }, signal);
+        const result = await this.executor.run(this.options.dockerBinary ?? 'docker', args, {
+          timeoutMs: request.timeout_ms,
+          maxOutputBytes: this.limits.maxOutputBytes,
+          killGraceMs: this.limits.killGraceMs,
+          onStderrLine: (line) => {
+            const update = parseProgressLine(line);
+            if (!update) return;
+            try { onProgress?.(update); } catch { /* progress is best effort */ }
+          },
+        }, signal);
         if (!result.timedOut && !result.cancelled && !result.outputLimit) {
           try {
             const envelope = JSON.parse(result.stdout) as { job_id?: unknown; issue_key?: unknown; result?: unknown };
@@ -891,6 +933,7 @@ export async function createSupervisorServer(options: RunnerSupervisorOptions): 
     req.once('aborted', () => cancellation.abort());
     res.once('close', () => { if (!res.writableEnded) cancellation.abort(); });
     res.setHeader('content-type', 'application/json');
+    let streamingRole = false;
     try {
       if (req.method === 'GET' && req.url === '/v1/health') {
         record.action = 'health';
@@ -906,9 +949,15 @@ export async function createSupervisorServer(options: RunnerSupervisorOptions): 
         record.job_id = parsed.job_id; record.role = parsed.role; record.provider = parsed.provider;
         const { model, effort, ...requestFields } = parsed;
         const request: ProviderRequest = { ...requestFields, ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
-        const result = await options.runner.runRole(translateRequest(request, clientRoot, hostRoot), cancellation.signal);
+        streamingRole = req.headers.accept?.split(',').some((value) => value.trim().split(';')[0] === 'application/x-ndjson') ?? false;
+        if (streamingRole) res.setHeader('content-type', 'application/x-ndjson; charset=utf-8');
+        const result = await options.runner.runRole(translateRequest(request, clientRoot, hostRoot), cancellation.signal, streamingRole ? (update) => {
+          const valid = progressUpdateSchema.safeParse(update);
+          if (valid.success && !res.destroyed && !res.writableEnded) res.write(`${safeJson({ progress: valid.data })}\n`);
+        } : undefined);
         record.status = result.status; if (result.error_code) record.code = result.error_code;
-        res.end(safeJson({ ...result, transcript_path: translatePath(result.transcript_path, hostRoot, clientRoot) })); return;
+        const response = { ...result, transcript_path: translatePath(result.transcript_path, hostRoot, clientRoot) };
+        res.end(streamingRole ? `${safeJson({ result: response })}\n` : safeJson(response)); return;
       }
       if (req.url === '/v1/run-checks') {
         record.action = 'run-checks';
@@ -951,7 +1000,8 @@ export async function createSupervisorServer(options: RunnerSupervisorOptions): 
       const code = error instanceof AutosError ? error.code : 'INVALID_INPUT';
       res.statusCode = code === 'NOT_FOUND' ? 404 : code === 'POLICY' ? 403 : code === 'UNAVAILABLE' ? 503 : 400;
       record.status = 'ERROR'; record.code = code;
-      res.end(safeJson({ error: code, message: error instanceof AutosError ? error.message : 'Supervisor request failed' }));
+      const body = { error: code, message: error instanceof AutosError ? error.message : 'Supervisor request failed' };
+      res.end(streamingRole ? `${safeJson({ error: body })}\n` : safeJson(body));
     } finally {
       record.http_status = res.statusCode; record.elapsed_ms = Math.round(performance.now() - startedAt);
       try { log(record); } catch { /* logging must never fail a request */ }
@@ -977,17 +1027,60 @@ export class DockerRunnerClient implements RunnerPort {
     this.socketPath = options.socketPath;
     this.timeoutMs = options.requestTimeoutMs ?? 3_700_000;
   }
-  private async call(path: string, body?: unknown, signal?: AbortSignal, timeoutMs = this.timeoutMs): Promise<unknown> {
+  private async call(path: string, body?: unknown, signal?: AbortSignal, timeoutMs = this.timeoutMs, onProgress?: (update: ProgressUpdate) => void): Promise<unknown> {
     if (signal?.aborted) throw new AutosError('CANCELLED', 'Runner operation was cancelled');
     return await new Promise((resolvePromise, reject) => {
       let timedOut = false;
       let cancelled = false;
-      const req = httpRequest({ socketPath: this.socketPath, path, method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json' }, timeout: timeoutMs }, (res) => {
+      const req = httpRequest({ socketPath: this.socketPath, path, method: body === undefined ? 'GET' : 'POST', headers: { 'content-type': 'application/json', ...(onProgress ? { accept: 'application/x-ndjson' } : {}) }, timeout: timeoutMs }, (res) => {
         const chunks: Buffer[] = [];
         let size = 0;
-        res.on('data', (chunk: Buffer) => { size += chunk.length; if (size <= 2_000_000) chunks.push(chunk); else req.destroy(new Error('response too large')); });
+        const streaming = res.headers['content-type']?.includes('application/x-ndjson') === true;
+        let pending = '';
+        let streamedResult: unknown;
+        let streamedError: unknown;
+        let invalidStream = false;
+        const consumeLine = (line: string) => {
+          const lineBytes = Buffer.byteLength(line, 'utf8');
+          if (lineBytes > 2_000_000) { invalidStream = true; return; }
+          try {
+            const value = JSON.parse(line) as unknown;
+            if (!value || typeof value !== 'object' || Array.isArray(value)) return;
+            const record = value as Record<string, unknown>;
+            if (Object.keys(record).length === 1 && Object.hasOwn(record, 'progress')) {
+              if (lineBytes > 65_536) return;
+              const parsed = progressUpdateSchema.safeParse(record.progress);
+              if (parsed.success) { try { onProgress?.(parsed.data); } catch { /* progress is best effort */ } }
+            } else if (Object.keys(record).length === 1 && Object.hasOwn(record, 'result')) streamedResult = record.result;
+            else if (Object.keys(record).length === 1 && Object.hasOwn(record, 'error')) streamedError = record.error;
+          } catch { /* malformed progress or unrelated lines are ignored */ }
+        };
+        res.on('data', (chunk: Buffer) => {
+          if (!streaming) {
+            size += chunk.length;
+            if (size > 2_000_000) { req.destroy(new Error('response too large')); return; }
+            chunks.push(chunk); return;
+          }
+          // Streaming: progress lines are consumed as they arrive, so only a single line is bounded (below).
+          if (invalidStream) return;
+          pending += chunk.toString('utf8');
+          if (Buffer.byteLength(pending, 'utf8') > 2_000_000 && !pending.includes('\n')) { invalidStream = true; req.destroy(new Error('response line too large')); return; }
+          let newline: number;
+          while ((newline = pending.indexOf('\n')) >= 0) { const line = pending.slice(0, newline).replace(/\r$/, ''); pending = pending.slice(newline + 1); consumeLine(line); }
+        });
         res.on('end', () => {
           try {
+            if (streaming) {
+              if (pending) consumeLine(pending);
+              if (invalidStream || streamedResult === undefined && streamedError === undefined) throw new Error('invalid stream');
+              if ((res.statusCode ?? 500) >= 400 || streamedError !== undefined) {
+                const data = streamedError && typeof streamedError === 'object' ? streamedError as { error?: unknown } : {};
+                const code = typeof data.error === 'string' && ERROR_CODES.includes(data.error as (typeof ERROR_CODES)[number]) ? data.error as (typeof ERROR_CODES)[number] : 'TOOL';
+                reject(new AutosError(code, 'Runner supervisor rejected the operation', { retryable: code === 'TOOL' || code === 'TIMEOUT' || code === 'UNAVAILABLE' }));
+                return;
+              }
+              resolvePromise(streamedResult); return;
+            }
             const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
             if ((res.statusCode ?? 500) >= 400) {
               const data = parsed && typeof parsed === 'object' ? parsed as { error?: unknown } : {};
@@ -1035,10 +1128,10 @@ export class DockerRunnerClient implements RunnerPort {
     }
     return health;
   }
-  async runRole(request: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> {
+  async runRole(request: ProviderRequest, signal?: AbortSignal, onProgress?: (update: ProgressUpdate) => void): Promise<ProviderResult> {
     const parsed = providerRequestSchema.parse(request);
     try {
-      const response = providerResultSchema.parse(await this.call('/v1/run-role', parsed, signal, parsed.timeout_ms + 30_000));
+      const response = providerResultSchema.parse(await this.call('/v1/run-role', parsed, signal, parsed.timeout_ms + 30_000, onProgress ?? (() => undefined)));
       if (response.provider !== parsed.provider || response.role !== parsed.role || response.model !== parsed.model || response.transcript_path !== parsed.transcript_path) throw new AutosError('INVALID_OUTPUT', 'Runner supervisor returned mismatched role evidence');
       const { model, error_code: errorCode, retry_at: retryAt, ...fields } = response;
       return { ...fields, ...(model === undefined ? {} : { model }), ...(errorCode === undefined ? {} : { error_code: errorCode }), ...(retryAt === undefined ? {} : { retry_at: retryAt }) };

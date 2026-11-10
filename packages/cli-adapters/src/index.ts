@@ -299,7 +299,9 @@ async function cleanupRemainingGroup(child: ChildProcess, graceMs: number): Prom
   }
 }
 
-function execute(invocation: Invocation, request: ProviderRequest, env: Record<string, string>, options: CliAdapterOptions, signal?: AbortSignal): Promise<ProcessResult> {
+const MAX_PROGRESS_LINE_BYTES = 1_048_576;
+
+function execute(invocation: Invocation, request: ProviderRequest, env: Record<string, string>, options: CliAdapterOptions, signal?: AbortSignal, onLine?: (line: string) => void): Promise<ProcessResult> {
   const maxBytes = options.maxOutputBytes ?? defaultMaxOutput;
   const killGrace = options.killGraceMs ?? 750;
   return new Promise((resolvePromise) => {
@@ -317,6 +319,32 @@ function execute(invocation: Invocation, request: ProviderRequest, env: Record<s
     const spawnProcess = options.spawnProcess ?? spawn;
     let child: ChildProcess;
     let spawnErrorCode: string | undefined;
+    let lineBuffer = '';
+    let droppingLongLine = false;
+    const publishLines = (chunk: string, final = false) => {
+      if (!onLine) return;
+      let rest = lineBuffer + chunk;
+      lineBuffer = '';
+      let newline: number;
+      while ((newline = rest.indexOf('\n')) >= 0) {
+        const line = rest.slice(0, newline).replace(/\r$/, '');
+        if (!droppingLongLine && Buffer.byteLength(line, 'utf8') <= MAX_PROGRESS_LINE_BYTES) {
+          try { onLine(line); } catch { /* progress callbacks never affect the role */ }
+        }
+        droppingLongLine = false;
+        rest = rest.slice(newline + 1);
+      }
+      if (final && rest.length > 0) {
+        if (!droppingLongLine && Buffer.byteLength(rest, 'utf8') <= MAX_PROGRESS_LINE_BYTES) {
+          try { onLine(rest.replace(/\r$/, '')); } catch { /* progress callbacks never affect the role */ }
+        }
+        lineBuffer = '';
+        droppingLongLine = false;
+      } else if (Buffer.byteLength(rest, 'utf8') > MAX_PROGRESS_LINE_BYTES) {
+        lineBuffer = '';
+        droppingLongLine = true;
+      } else if (!droppingLongLine) lineBuffer = rest;
+    };
     try {
       child = spawnProcess(invocation.binary, invocation.args, {
         cwd: request.cwd,
@@ -351,7 +379,11 @@ function execute(invocation: Invocation, request: ProviderRequest, env: Record<s
     const collect = (target: 'stdout' | 'stderr') => (chunk: Buffer) => {
       totalBytes += chunk.byteLength;
       if (totalBytes > maxBytes) { stop('limit'); return; }
-      if (target === 'stdout') stdout += chunk.toString('utf8');
+      if (target === 'stdout') {
+        const text = chunk.toString('utf8');
+        stdout += text;
+        publishLines(text);
+      }
       else stderr += chunk.toString('utf8');
     };
     child.stdout?.on('data', collect('stdout'));
@@ -359,6 +391,7 @@ function execute(invocation: Invocation, request: ProviderRequest, env: Record<s
     const settle = async (code: number | null, exitSignal: NodeJS.Signals | null) => {
       if (settled) return;
       settled = true;
+      publishLines('', true);
       if (timer) clearTimeout(timer);
       try { await (groupCleanup ?? cleanupRemainingGroup(child, killGrace)); }
       finally {
@@ -672,7 +705,7 @@ export class CliProviderAdapter implements ProviderAdapterPort {
     this.options = options;
   }
 
-  async run(untrustedRequest: ProviderRequest, signal?: AbortSignal): Promise<ProviderResult> {
+  async run(untrustedRequest: ProviderRequest, signal?: AbortSignal, onLine?: (line: string) => void): Promise<ProviderResult> {
     const parsedRequest = providerRequestSchema.parse(untrustedRequest);
     const { model, effort, ...requestBase } = parsedRequest;
     const request: ProviderRequest = { ...requestBase, ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
@@ -698,7 +731,7 @@ export class CliProviderAdapter implements ProviderAdapterPort {
     }
     if (signal?.aborted) return await this.finish(request, start, { status: 'CANCELLED', exit_code: null, elapsed_ms: performance.now() - start, result: null, error_code: 'CANCELLED' }, '[cancelled before launch]');
     const invocation = buildInvocation(this.provider, request.role, request, prompt, this.options.binaries ?? {}, this.options.sweBashPrefixes ?? DEFAULT_SWE_BASH_PREFIXES, this.options.codexSandbox ?? 'native');
-    const processResult = await execute(invocation, request, safeEnvironment(this.provider, this.options.baseEnv ?? { PATH: process.env.PATH ?? '' }, auth, resolve(request.cwd)), this.options, signal);
+    const processResult = await execute(invocation, request, safeEnvironment(this.provider, this.options.baseEnv ?? { PATH: process.env.PATH ?? '' }, auth, resolve(request.cwd)), this.options, signal, onLine);
     const redact = makeRedactor(auth);
     const transcript = redact(processResult.stdout + (processResult.stderr ? `\n[stderr]\n${processResult.stderr}` : ''));
     const elapsed = performance.now() - start;

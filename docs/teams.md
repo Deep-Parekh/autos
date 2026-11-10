@@ -2,6 +2,8 @@
 
 `autos teams relay` posts a card to a Teams channel or chat when an attempt finishes, is blocked or pauses. Communication is one way: outbound HTTPS from your machine to a Teams Workflows webhook. Nothing is exposed, and the controller keeps listening on loopback only. Commands from Teams (revise, pin a tier, close) need a Teams bot; that is a later phase.
 
+Add `AGENT_PROGRESS` to `notifications.teams.notify` to receive live action cards. It is off unless explicitly listed. The relay sends at most one progress card per job every 10 minutes; a card shows the ticket, role/provider, latest sanitized action, and elapsed role time when known. Progress events never trigger another notification kind.
+
 ## 1. Create the webhook in Teams
 
 1. In the target channel (or chat), open **Workflows** and choose the template **Post to a channel when a webhook request is received** (in a chat: *Post to a chat when a webhook request is received*).
