@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { knowledgeConfigSchema } from './knowledge.js';
 import { parseDocument } from 'yaml';
 import { AutosError } from './errors.js';
 import { branchNameSchema, envNameSchema, identifierSchema, modelSchema, projectKeySchema, providerSchema } from './domain.js';
@@ -280,6 +281,8 @@ const configObjectSchema = z.strictObject({
   api: z.strictObject({ listen_host: z.enum(['127.0.0.1', '::1']), port: z.number().int().min(1024).max(65535), operator_token_env: envNameSchema }),
   /** Optional outbound notifications (see notificationsSchema). */
   notifications: notificationsSchema.optional(),
+  /** Optional read-only Jira/Confluence tools for agents (see knowledge.ts); off unless `enabled: true`. */
+  knowledge: knowledgeConfigSchema.optional(),
 });
 /**
  * Per-section schemas of the configuration file (input form). A parsed AutosConfig is the resolved output (tier ladders

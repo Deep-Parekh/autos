@@ -7,6 +7,7 @@ import type { ProviderCall } from './dataset.js';
 import type { InstalledToolchains, ToolchainSelection } from './toolchain.js';
 import type { CloseIssueRequest, CloseIssueResult, IssueClosure, IssueResolution, JobEvent, OperatorNoteRequest, PruneWorkspacesRequest, PruneWorkspacesResult, TicketNote, TicketNotesSummary, TierPin, TierPinRequest, TierPinResult, WorkflowActivity, WorkspaceEntry } from './jobs.js';
 import type { ProgressUpdate } from './progress.js';
+import type { KnowledgeSession, KnowledgeSessionPort } from './knowledge.js';
 
 export interface AtlassianReadPort {
   getSavedFilter(filterId: string, signal?: AbortSignal): Promise<SavedFilter>;
@@ -110,6 +111,8 @@ export interface ProviderRequest {
   toolchain?: ToolchainSelection | undefined;
   /** Reasoning effort for this call (validated per provider); absent = the CLI's default. */
   effort?: Effort;
+  /** Read-only knowledge tools for this run (gateway URL + per-run token); absent = no tools. */
+  knowledge?: KnowledgeSession | undefined;
 }
 export interface ProviderResult {
   provider: Provider; role: AgentRole; status: 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'TIMED_OUT';
@@ -195,6 +198,8 @@ export interface ClockPort { now(): Date }
 export interface WorkflowDependencies {
   config: AutosConfig; atlassian: AtlassianReadPort; precedents: PrecedentReadPort;
   git: GitRunnerPort; runner: RunnerPort; jobs: JobStorePort; artifacts: ArtifactStorePort; clock: ClockPort;
+  /** Optional read-only Jira/Confluence tool sessions for role runs (the knowledge gateway). */
+  knowledge?: KnowledgeSessionPort;
 }
 export interface WorkflowServicePort {
   /** Optional operator notes apply to this attempt's roles (see operatorNoteRequestSchema). */

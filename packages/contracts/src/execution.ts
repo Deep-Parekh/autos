@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { knowledgeSessionSchema } from './knowledge.js';
 import { isAbsolute } from 'node:path';
 import { ERROR_CODES } from './errors.js';
 import { toolchainSelectionSchema } from './toolchain.js';
@@ -13,6 +14,8 @@ export const providerRequestSchema = z.strictObject({
   toolchain: toolchainSelectionSchema.optional(),
   /** Reasoning effort passed to the CLI (claude --effort, codex -c model_reasoning_effort); absent = CLI default. */
   effort: effortSchema.optional(),
+  /** Read-only knowledge tools for this run (gateway URL + per-run token); absent = no tools. */
+  knowledge: knowledgeSessionSchema.optional(),
 }).refine((request) => request.role === 'swe' || request.source_access === 'read', 'QA and reviewer require source-read access')
   .refine((request) => request.effort === undefined || PROVIDER_EFFORTS[request.provider].includes(request.effort), 'Reasoning effort is not supported by this provider');
 

@@ -10,3 +10,4 @@ export * from './dataset.js';
 export * from './toolchain.js';
 export * from './transcript.js';
 export * from './progress.js';
+export * from './knowledge.js';
