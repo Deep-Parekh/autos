@@ -12,6 +12,7 @@ import { GitRunner } from '@autos/git-runner';
 import { DockerRunnerClient } from '@autos/runner';
 import { FileArtifactStore, SqliteJobStore, createWorkflowService } from '@autos/workflow';
 import type { ControllerServices, ProviderDiagnostic } from './index.js';
+import { KnowledgeGateway } from './knowledge-gateway.js';
 
 export interface RuntimeOptions {
   configPath?: string;
@@ -107,7 +108,18 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Contr
   const git = options.git ?? new GitRunner({ allowedRepositories: config.bitbucket.allowed_repositories, pushEnabled: config.bitbucket.push_feature_branch, pushBlockedEnabled: config.bitbucket.push_blocked_attempts, trustedCredentials });
   const jobs = new SqliteJobStore(join(config.storage.data_dir, 'autos.sqlite'));
   const artifacts = new FileArtifactStore(config.storage.artifacts_dir);
-  const service = createWorkflowService({ config, atlassian, precedents, git, runner, jobs, artifacts, clock: options.clock ?? { now: () => new Date() } });
+  // Read-only Jira/Confluence tools for agents. The gateway keeps the Atlassian credential on the host; it binds its
+  // port only when the first role session opens, so short-lived CLI commands never listen.
+  const knowledge = config.knowledge?.enabled ? new KnowledgeGateway({
+    config,
+    reads: {
+      getIssueDetail: (...args) => getClient().getIssueDetail(...args), getIssueComments: (...args) => getClient().getIssueComments(...args),
+      getIssueAttachment: (...args) => getClient().getIssueAttachment(...args), searchIssues: (...args) => getClient().searchIssues(...args),
+      searchPages: (...args) => getClient().searchPages(...args), getPage: (...args) => getClient().getPage(...args), getPageChildren: (...args) => getClient().getPageChildren(...args),
+    },
+    log: (record) => { try { process.stderr.write(`${JSON.stringify({ at: new Date().toISOString(), ...record })}\n`); } catch { /* logging never fails a job */ } },
+  }) : undefined;
+  const service = createWorkflowService({ config, atlassian, precedents, git, runner, jobs, artifacts, clock: options.clock ?? { now: () => new Date() }, ...(knowledge ? { knowledge } : {}) });
   const shutdown = new AbortController();
   const active = new Set<Promise<unknown>>();
   let closed = false;
@@ -201,6 +213,7 @@ export async function createRuntime(options: RuntimeOptions = {}): Promise<Contr
       if (closed) return;
       closed = true; shutdown.abort();
       await Promise.allSettled([...active]);
+      await knowledge?.stop().catch(() => undefined);
       jobs.close();
     },
   };

@@ -1,5 +1,7 @@
 # Read-only Jira and Confluence access for agents: plan
 
+Status: implemented (all chunks). Tested with fake Atlassian, fake runners and fake CLIs; not yet run against real Atlassian content with real coding CLIs. Operator guide: [knowledge.md](knowledge.md).
+
 Goal: agents can read a ticket's comments, attachments and linked issues, search resolved tickets, and search and read Confluence pages (knowledge base, earlier fixes in other projects) through MCP tools. Nothing can be written to Jira or Confluence, and each installation chooses which Confluence spaces and Jira projects are readable.
 
 Today the controller reads Jira and Confluence itself and copies only the ticket's summary, description and acceptance criteria into the prompt. Agents have no Atlassian access.

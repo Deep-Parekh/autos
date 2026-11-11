@@ -5,6 +5,7 @@ import { performance } from 'node:perf_hooks';
 import {
   AutosError,
   CURSOR_MODEL,
+  KNOWLEDGE_MCP_SERVER,
   providerRequestSchema,
   providerResultSchema,
   type AgentRole,
@@ -15,7 +16,15 @@ import {
   type ProviderResult,
 } from '@autos/contracts';
 
+/** A stdio MCP server the CLI should start for this run (the credential-free knowledge shim). */
+export interface KnowledgeMcpServer { command: string; args: string[]; env: Record<string, string> }
 export interface CliAdapterOptions {
+  /**
+   * Read-only knowledge tools (KNOWLEDGE_MCP_SERVER): claude gets --mcp-config/--strict-mcp-config and the server on its
+   * allow-list; codex gets -c mcp_servers overrides; cursor gets --approve-mcps (its ~/.cursor/mcp.json is written by the
+   * worker entrypoint; unverified against a real cursor binary like its other flags).
+   */
+  knowledgeMcp?: KnowledgeMcpServer;
   /** Executable paths or command names; each call still uses spawn(argv), never a shell. */
   binaries?: Partial<Record<Provider, string>>;
   /** Only this profile's credentials may be added to the child environment. */
@@ -179,16 +188,32 @@ const CLAUDE_SWE_DISALLOWED = ['WebFetch', 'WebSearch', 'Bash(git push:*)', 'Bas
 const CLAUDE_READ_TOOLS = 'Read,Grep,Glob';
 const CLAUDE_READ_DISALLOWED = ['Edit', 'Write', 'NotebookEdit', 'Bash', 'WebFetch', 'WebSearch'].join(',');
 
-function claudePermissionArgs(role: AgentRole, bashPrefixes: readonly string[]): string[] {
+function claudePermissionArgs(role: AgentRole, bashPrefixes: readonly string[], mcpServers: readonly string[] = []): string[] {
+  // `mcp__<server>` allows every tool of that server; only servers Autos itself configured are ever listed.
+  const mcp = mcpServers.map((name) => `,mcp__${name}`).join('');
   if (role === 'swe') {
     const allowed = ['Read', 'Grep', 'Glob', 'Edit', 'Write', ...bashPrefixes.map((prefix) => `Bash(${prefix}:*)`)].join(',');
-    return ['--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--tools', CLAUDE_SWE_TOOLS, '--allowedTools', allowed, '--disallowedTools', CLAUDE_SWE_DISALLOWED];
+    return ['--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--tools', CLAUDE_SWE_TOOLS, '--allowedTools', `${allowed}${mcp}`, '--disallowedTools', CLAUDE_SWE_DISALLOWED];
   }
-  return ['--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--tools', CLAUDE_READ_TOOLS, '--allowedTools', CLAUDE_READ_TOOLS, '--disallowedTools', CLAUDE_READ_DISALLOWED];
+  return ['--permission-mode', 'dontAsk', '--permission-prompts', 'none', '--tools', CLAUDE_READ_TOOLS, '--allowedTools', `${CLAUDE_READ_TOOLS}${mcp}`, '--disallowedTools', CLAUDE_READ_DISALLOWED];
 }
 
-function buildInvocation(provider: Provider, role: AgentRole, request: ProviderRequest, prompt: string, binaries: Partial<Record<Provider, string>>, bashPrefixes: readonly string[] = DEFAULT_SWE_BASH_PREFIXES, codexSandbox: 'native' | 'container' = 'native'): Invocation {
+/** CLI arguments that register the knowledge MCP server. Values are argv elements or JSON/TOML literals, never shell text. */
+function knowledgeMcpArgs(provider: Provider, server: KnowledgeMcpServer | undefined): string[] {
+  if (!server) return [];
+  if (provider === 'claude') return ['--mcp-config', JSON.stringify({ mcpServers: { [KNOWLEDGE_MCP_SERVER]: { command: server.command, args: server.args, env: server.env } } }), '--strict-mcp-config'];
+  if (provider === 'codex') {
+    // JSON string/array literals are valid TOML for these values (paths, a URL and a base64url token).
+    const table = `{${Object.entries(server.env).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(',')}}`;
+    const prefix = `mcp_servers.${KNOWLEDGE_MCP_SERVER}`;
+    return ['-c', `${prefix}.command=${JSON.stringify(server.command)}`, '-c', `${prefix}.args=${JSON.stringify(server.args)}`, '-c', `${prefix}.env=${table}`];
+  }
+  return ['--approve-mcps'];
+}
+
+function buildInvocation(provider: Provider, role: AgentRole, request: ProviderRequest, prompt: string, binaries: Partial<Record<Provider, string>>, bashPrefixes: readonly string[] = DEFAULT_SWE_BASH_PREFIXES, codexSandbox: 'native' | 'container' = 'native', knowledgeMcp?: KnowledgeMcpServer): Invocation {
   const binary = binaries[provider] ?? defaults[provider];
+  const mcpArgs = knowledgeMcpArgs(provider, knowledgeMcp);
   const modelArgs = provider === 'cursor' ? ['--model', CURSOR_MODEL] : request.model ? ['--model', request.model] : [];
   // Reasoning effort is its own argv element (never interpolated into a shell): claude `--effort <level>` (claude --help);
   // codex `-c model_reasoning_effort="<level>"` (a documented -c TOML override; the level is a validated enum, so quoting is fixed).
@@ -199,7 +224,7 @@ function buildInvocation(provider: Provider, role: AgentRole, request: ProviderR
     case 'claude':
       // `claude -p` reads the prompt from stdin when no prompt argument is given (help: "[prompt]" optional,
       // --input-format text default), which avoids the per-argument argv size limit.
-      return { binary, args: ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', ...claudePermissionArgs(role, bashPrefixes), ...modelArgs, ...effortArgs], stdin: prompt };
+      return { binary, args: ['-p', '--output-format', 'stream-json', '--verbose', '--no-session-persistence', ...claudePermissionArgs(role, bashPrefixes, knowledgeMcp ? [KNOWLEDGE_MCP_SERVER] : []), ...mcpArgs, ...modelArgs, ...effortArgs], stdin: prompt };
     case 'codex':
       // Approval policy "never" (codex exec has no -a flag; -c is documented) so a run can never block on a prompt.
       // Native sandbox: workspace-write (SWE) / read-only (others). In the Autos worker container Codex's bubblewrap cannot
@@ -208,13 +233,13 @@ function buildInvocation(provider: Provider, role: AgentRole, request: ProviderR
       // --dangerously-bypass-approvals-and-sandbox is never used.
       return {
         binary,
-        args: ['exec', '--json', '--ephemeral', '--cd', request.cwd, '--sandbox', codexSandbox === 'container' ? 'danger-full-access' : mayWrite ? 'workspace-write' : 'read-only', '-c', 'approval_policy="never"', '--skip-git-repo-check', ...modelArgs, ...effortArgs, '-'],
+        args: ['exec', '--json', '--ephemeral', '--cd', request.cwd, '--sandbox', codexSandbox === 'container' ? 'danger-full-access' : mayWrite ? 'workspace-write' : 'read-only', '-c', 'approval_policy="never"', '--skip-git-repo-check', ...mcpArgs, ...modelArgs, ...effortArgs, '-'],
         stdin: prompt,
       };
     case 'cursor':
       // cursor-agent is unused by default and not installable here, so flags are unverified against a real binary.
       // --force (allow file edits/commands in print mode) is gated to SWE only; QA/reviewer never receive it.
-      return { binary, args: ['-p', '--output-format', 'stream-json', ...modelArgs, ...(mayWrite ? ['--force'] : []), '--', prompt] };
+      return { binary, args: ['-p', '--output-format', 'stream-json', ...mcpArgs, ...modelArgs, ...(mayWrite ? ['--force'] : []), '--', prompt] };
   }
 }
 
@@ -730,9 +755,10 @@ export class CliProviderAdapter implements ProviderAdapterPort {
       return await this.finish(request, start, { status: 'FAILED', exit_code: null, elapsed_ms: performance.now() - start, result: null, error_code: 'AUTH' }, '[auth profile unavailable]');
     }
     if (signal?.aborted) return await this.finish(request, start, { status: 'CANCELLED', exit_code: null, elapsed_ms: performance.now() - start, result: null, error_code: 'CANCELLED' }, '[cancelled before launch]');
-    const invocation = buildInvocation(this.provider, request.role, request, prompt, this.options.binaries ?? {}, this.options.sweBashPrefixes ?? DEFAULT_SWE_BASH_PREFIXES, this.options.codexSandbox ?? 'native');
+    const invocation = buildInvocation(this.provider, request.role, request, prompt, this.options.binaries ?? {}, this.options.sweBashPrefixes ?? DEFAULT_SWE_BASH_PREFIXES, this.options.codexSandbox ?? 'native', this.options.knowledgeMcp);
     const processResult = await execute(invocation, request, safeEnvironment(this.provider, this.options.baseEnv ?? { PATH: process.env.PATH ?? '' }, auth, resolve(request.cwd)), this.options, signal, onLine);
-    const redact = makeRedactor(auth);
+    // The per-run knowledge token is in the CLI's arguments/config; keep it out of stored transcripts like provider credentials.
+    const redact = makeRedactor({ ...auth, ...(this.options.knowledgeMcp?.env.AUTOS_KNOWLEDGE_TOKEN ? { AUTOS_KNOWLEDGE_TOKEN: this.options.knowledgeMcp.env.AUTOS_KNOWLEDGE_TOKEN } : {}) });
     const transcript = redact(processResult.stdout + (processResult.stderr ? `\n[stderr]\n${processResult.stderr}` : ''));
     const elapsed = performance.now() - start;
     if (processResult.spawnErrorCode !== undefined) {

@@ -120,3 +120,24 @@ api:
 #       tenant_id: 00000000-0000-0000-0000-000000000000
 #       client_id: 00000000-0000-0000-0000-000000000000
 #       client_secret_env: AUTOS_TEAMS_CLIENT_SECRET
+
+# Optional read-only Jira/Confluence tools for agents (docs/knowledge.md). Off by default; nothing can be written.
+# Add `knowledge:` only after reading that guide: content agents read is sent to their model provider.
+# knowledge:
+#   enabled: false                 # true turns it on (rebuild the worker images, restart supervisor and controller)
+#   roles: [swe, qa, reviewer]     # roles that get the tools
+#   gateway:
+#     listen_host: 127.0.0.1       # Linux: the Docker bridge gateway address instead (docs/knowledge.md)
+#     port: 8791
+#     advertise_url: http://host.docker.internal:8791
+#   jira:
+#     projects: [SAMPLE]           # optional; default is jira.allowed_projects
+#   confluence:
+#     spaces: [DOCS, KB]           # space keys from /wiki/spaces/KEY/ (personal spaces start with ~)
+#     pages: []                    # page IDs: each page and all its descendants are readable
+#   limits:
+#     max_calls_per_run: 80
+#     max_result_chars: 40000
+#     max_total_chars_per_run: 600000
+#     max_attachment_bytes: 5242880
+#     search_results: 10

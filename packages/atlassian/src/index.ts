@@ -1,8 +1,9 @@
 import { parseFragment } from 'parse5';
 import { z } from 'zod';
+import { createKnowledgeReads } from './knowledge.js';
 import {
   AutosError, parseJdkCell, parseTomcatCell, issueSnapshotSchema, configSectionSchemas, projectMappingSchema, precedentResultSchema, savedFilterSchema,
-  type AtlassianReadPort, type AutosConfig, type IssueSnapshot, type PrecedentReadPort,
+  type AtlassianReadPort, type AutosConfig, type KnowledgeReadPort, type IssueSnapshot, type PrecedentReadPort,
   type PrecedentResult, type ProjectMapping, type SavedFilter,
 } from '@autos/contracts';
 
@@ -225,7 +226,7 @@ function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export class AtlassianClient implements AtlassianReadPort {
+export class AtlassianClient implements AtlassianReadPort, KnowledgeReadPort {
   private readonly config: AutosConfig;
   private readonly fetcher: FetchLike;
   private readonly now: () => Date;
@@ -235,6 +236,7 @@ export class AtlassianClient implements AtlassianReadPort {
   private readonly jiraAuth: string;
   private readonly confluenceAuth: string;
   readonly precedents: PrecedentReadPort;
+  private readonly knowledge: KnowledgeReadPort;
 
   constructor(private readonly options: AtlassianOptions) {
     // Defense in depth: re-check the sections this client uses (the whole parsed config is resolved output, not input).
@@ -253,6 +255,12 @@ export class AtlassianClient implements AtlassianReadPort {
     this.retries = options.maxRetries ?? maxRetriesDefault;
     this.jiraAuth = this.basic(options.credentials.jira);
     this.confluenceAuth = this.basic(options.credentials.confluence);
+    this.knowledge = createKnowledgeReads({
+      jira: { site: this.config.jira.site_url, auth: this.jiraAuth }, confluence: { site: this.config.confluence.site_url, auth: this.confluenceAuth },
+      getJson: (site, path, auth, query, signal) => this.getJson(site, path, auth, query, signal),
+      getBytes: (site, path, auth, query, maxBytes, signal) => this.getBytes(site, path, auth, query, maxBytes, signal),
+      plainText, escapeJql, safeError,
+    });
     this.precedents = { findPrecedents: async (issue, mapping, signal) => {
       if (!this.config.jobs.similar_tickets.enabled) return { outcome: 'DISABLED', items: [], disabled_reason: 'CONFIG_DISABLED' };
       if (options.precedentSearch) {
@@ -453,6 +461,67 @@ export class AtlassianClient implements AtlassianReadPort {
     if (url.origin !== new URL(site).origin) throw safeError('INTERNAL', 'Refused an unsafe Atlassian URL');
     for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
     return url;
+  }
+
+  getIssueDetail: KnowledgeReadPort['getIssueDetail'] = (key, signal) => this.knowledge.getIssueDetail(key, signal);
+  getIssueComments: KnowledgeReadPort['getIssueComments'] = (key, signal) => this.knowledge.getIssueComments(key, signal);
+  getIssueAttachment: KnowledgeReadPort['getIssueAttachment'] = (key, id, max, signal) => this.knowledge.getIssueAttachment(key, id, max, signal);
+  searchIssues: KnowledgeReadPort['searchIssues'] = (input, signal) => this.knowledge.searchIssues(input, signal);
+  searchPages: KnowledgeReadPort['searchPages'] = (input, signal) => this.knowledge.searchPages(input, signal);
+  getPage: KnowledgeReadPort['getPage'] = (id, signal) => this.knowledge.getPage(id, signal);
+  getPageChildren: KnowledgeReadPort['getPageChildren'] = (id, limit, signal) => this.knowledge.getPageChildren(id, limit, signal);
+
+  /** GET raw bytes (attachments). Refuses redirects, caps the body while streaming. Same retry/timeout handling as getJson. */
+  private async getBytes(site: string, path: string, auth: string, query: Record<string, string>, maxBytes: number, signal?: AbortSignal): Promise<Uint8Array> {
+    const url = this.url(site, path, query);
+    for (let attempt = 0; ; attempt += 1) {
+      if (signal?.aborted) throw safeError('CANCELLED', 'Atlassian request cancelled');
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+      const abortParent = () => controller.abort();
+      signal?.addEventListener('abort', abortParent, { once: true });
+      try {
+        const response = await this.fetcher(url, { method: 'GET', headers: { Accept: '*/*', Authorization: auth }, redirect: 'manual', signal: controller.signal });
+        if (controller.signal.aborted) throw safeError('TIMEOUT', 'Atlassian request timed out', true);
+        if (response.status >= 300 && response.status < 400) throw safeError('FORBIDDEN', 'Atlassian redirected a read request; redirect refused');
+        if ((response.status === 429 || response.status >= 500) && attempt < this.retries) {
+          const retryAfter = response.headers.get('retry-after');
+          const seconds = retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) : NaN;
+          await response.body?.cancel().catch(() => undefined);
+          await this.sleep(Number.isFinite(seconds) ? Math.min(30_000, seconds * 1000) : Math.min(5_000, 200 * 2 ** attempt), signal);
+          continue;
+        }
+        if (response.status === 401) throw safeError('AUTH', 'Atlassian authentication failed; use a classic (unscoped) API token for this site');
+        if (response.status === 403) throw safeError('FORBIDDEN', 'Atlassian denied access to the requested resource');
+        if (response.status === 404) throw safeError('NOT_FOUND', 'Atlassian resource was not found');
+        if (response.status === 429) throw safeError('RATE_LIMIT', 'Atlassian rate limit persisted after retries', true);
+        if (!response.ok) throw safeError('UPSTREAM', 'Atlassian read request failed', response.status >= 500);
+        const reader = response.body?.getReader();
+        if (!reader) throw safeError('UPSTREAM', 'Atlassian returned an empty response body');
+        const chunks: Uint8Array[] = [];
+        let total = 0;
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value.byteLength;
+            if (total > maxBytes) throw safeError('INVALID_INPUT', 'Attachment exceeds the size limit');
+            chunks.push(value);
+          }
+        } finally { await reader.cancel().catch(() => undefined); }
+        if (signal?.aborted) throw safeError('CANCELLED', 'Atlassian request cancelled');
+        if (controller.signal.aborted) throw safeError('TIMEOUT', 'Atlassian request timed out', true);
+        const data = new Uint8Array(total);
+        let offset = 0;
+        for (const chunk of chunks) { data.set(chunk, offset); offset += chunk.byteLength; }
+        return data;
+      } catch (error) {
+        if (error instanceof AutosError) throw error;
+        if (signal?.aborted) throw safeError('CANCELLED', 'Atlassian request cancelled');
+        if (controller.signal.aborted) throw safeError('TIMEOUT', 'Atlassian request timed out', true);
+        throw safeError('UPSTREAM', 'Atlassian could not be reached', true);
+      } finally { clearTimeout(timeout); signal?.removeEventListener('abort', abortParent); }
+    }
   }
 
   private async getJson(site: string, path: string, auth: string, query: Record<string, string> = {}, signal?: AbortSignal): Promise<unknown> {

@@ -201,6 +201,10 @@ Evidence:
 - `summary.md` shows the tier and entry that solved the ticket.
 - `autos export dataset` includes `tiers` and the call fields, so you can later check which tickets a cheaper tier would have solved.
 
+## Optional: Jira and Confluence tools for agents
+
+Agents can look up tickets and Confluence pages read-only through a host gateway; it is off by default. See [knowledge.md](knowledge.md).
+
 ## Scaling to several tickets on a larger host
 
 The pilot processes one ticket at a time (`jobs.max_parallel: 1`). On a larger machine, raise it in `config/config.yaml` and restart the controller; no code change is needed:

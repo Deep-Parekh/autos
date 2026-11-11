@@ -517,3 +517,22 @@ test('DockerRunner forwards a validated reasoning effort to the worker as its ow
     await assert.rejects(() => runner.runRole({ ...request(paths), provider: 'cursor', effort: 'high' }));
   } finally { await rm(paths.root, { recursive: true, force: true }); }
 });
+
+test('a knowledge session reaches the worker only through the private env file, with the host mapping when a network exists', async () => {
+  const paths = await fixture();
+  const token = 'k'.repeat(43);
+  try {
+    const executor = new FakeDocker();
+    const runner = new DockerRunner({ workerImage: 'worker:test', checksImage: 'checks:test', workspaceRoot: paths.workspaceRoot, promptRoot: paths.promptRoot, outputRoot: paths.outputRoot, providerNetwork: { name: 'autos-egress', approved: true }, executor, testOnly: true });
+    await runner.runRole({ ...request(paths), knowledge: { url: 'http://host.docker.internal:8791', token } });
+    assert.match(executor.envFileContents, /^AUTOS_KNOWLEDGE_URL=http:\/\/host\.docker\.internal:8791$/m);
+    assert.match(executor.envFileContents, new RegExp(`^AUTOS_KNOWLEDGE_TOKEN=${token}$`, 'm'));
+    const args = executor.calls[0]!.args;
+    assert.ok(!args.some((arg) => arg.includes(token)), 'the token is never in Docker argv');
+    assert.equal(args[args.indexOf('--add-host') + 1], 'host.docker.internal:host-gateway');
+    const plain = new FakeDocker();
+    await new DockerRunner({ workerImage: 'worker:test', checksImage: 'checks:test', workspaceRoot: paths.workspaceRoot, promptRoot: paths.promptRoot, outputRoot: paths.outputRoot, providerNetwork: { name: 'autos-egress', approved: true }, executor: plain, testOnly: true }).runRole(request(paths));
+    assert.doesNotMatch(plain.envFileContents, /AUTOS_KNOWLEDGE/); assert.equal(plain.calls[0]!.args.includes('--add-host'), false);
+    await assert.rejects(() => runner.runRole({ ...request(paths), knowledge: { url: 'http://h:1', token: 'bad\nINJECTED=1' } }));
+  } finally { await rm(paths.root, { recursive: true, force: true }); }
+});

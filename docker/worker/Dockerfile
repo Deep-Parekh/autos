@@ -28,7 +28,7 @@ COPY apps ./apps
 COPY scripts ./scripts
 COPY tsconfig*.json ./
 RUN npm ci --include=dev --ignore-scripts
-COPY docker/worker/entrypoint.mjs docker/worker/entrypoint.mjs
+COPY docker/worker/entrypoint.mjs docker/worker/knowledge-mcp.mjs docker/worker/
 RUN npx tsc -b packages/cli-adapters && npm prune --omit=dev \
  && groupadd -o --gid "${AUTOS_GID}" worker \
  && useradd -o --uid "${AUTOS_UID}" --gid "${AUTOS_GID}" --home-dir /home/worker --create-home --shell /usr/sbin/nologin worker \

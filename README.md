@@ -14,7 +14,9 @@ Limits: the scenario uses a **test-only local runner that is not an isolation bo
 
 - [Server setup](docs/server-setup.md) — Ubuntu deployment: Compose controller, systemd supervisor, credentials, safe first run.
 - [Local pilot on macOS](docs/local-pilot.md) — the same flow on a Mac with Docker Desktop.
+- [Read-only Jira and Confluence tools for agents](docs/knowledge.md) — optional knowledge tools: setup, allow-list, limits and risks.
 - [Environment requirements](docs/environment-requirements.md) — what must be installed on the host and in the Docker images on a new machine.
+- [Architecture and design decisions](docs/architecture/architecture-and-design-decisions.md) — how Autos is built, the tools it uses, and why each choice was made over the alternatives.
 - [Architecture diagram](docs/architecture/autos-server-architecture.html) — components, trust boundaries and the life of one ticket.
 - [Implementation plan](docs/implementation-plan.md) — scope, architecture, delivery order, and decisions needed before coding.
 - [Independent implementation tasks](docs/implementation-tasks.md) — six GPT-6 Luna workstreams, ownership, dependencies, and acceptance criteria.

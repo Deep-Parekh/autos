@@ -1,7 +1,7 @@
-import { cp, mkdir } from 'node:fs/promises';
+import { cp, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CliProviderAdapter } from '@autos/cli-adapters';
-import { ERROR_CODES, ProgressThrottle, formatProgressLine, progressFromLine } from '@autos/contracts';
+import { ERROR_CODES, KNOWLEDGE_MCP_SERVER, ProgressThrottle, formatProgressLine, knowledgeSessionSchema, progressFromLine } from '@autos/contracts';
 
 const DEFAULT_TIMEOUT_MS = 3_600_000;
 const MAX_TIMEOUT_MS = 86_400_000;
@@ -53,6 +53,26 @@ async function prepareCatalinaBase() {
   await cp(join(home, 'conf'), join(base, 'conf'), { recursive: true, force: true, dereference: false, verbatimSymlinks: true });
 }
 
+/**
+ * Read-only knowledge tools: when the runner passed a session (gateway URL + per-run token), describe the credential-free
+ * stdio shim for the coding CLI. An invalid or absent session simply means no tools; it never fails the role.
+ */
+function knowledgeMcpServer() {
+  const session = knowledgeSessionSchema.safeParse({ url: process.env.AUTOS_KNOWLEDGE_URL, token: process.env.AUTOS_KNOWLEDGE_TOKEN });
+  if (!session.success) return undefined;
+  return { command: process.execPath, args: ['/opt/autos/docker/worker/knowledge-mcp.mjs'], env: { AUTOS_KNOWLEDGE_URL: session.data.url, AUTOS_KNOWLEDGE_TOKEN: session.data.token } };
+}
+
+/** Cursor reads MCP servers from ~/.cursor/mcp.json (HOME is this run's private tmpfs). Best effort. */
+async function writeCursorMcpConfig(server) {
+  try {
+    const directory = join(process.env.HOME ?? '/home/worker', '.cursor');
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await writeFile(join(directory, 'mcp.json'), JSON.stringify({ mcpServers: { [KNOWLEDGE_MCP_SERVER]: server } }), { mode: 0o600 });
+    return true;
+  } catch { return false; }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   invocation = { provider: args.provider, role: args.role, model: args.model, transcript: args.transcript };
@@ -66,7 +86,10 @@ async function main() {
   const timeoutMs = envInteger('AUTOS_TIMEOUT_MS', DEFAULT_TIMEOUT_MS, 1_000, MAX_TIMEOUT_MS);
   const maxPromptBytes = envInteger('AUTOS_MAX_PROMPT_BYTES', DEFAULT_MAX_PROMPT_BYTES, 1_024, 10_000_000);
   const maxTranscriptBytes = envInteger('AUTOS_MAX_TRANSCRIPT_BYTES', DEFAULT_MAX_TRANSCRIPT_BYTES, 65_536, 52_428_800);
+  let knowledgeMcp = knowledgeMcpServer();
+  if (knowledgeMcp && args.provider === 'cursor' && !(await writeCursorMcpConfig(knowledgeMcp))) knowledgeMcp = undefined;
   const adapter = new CliProviderAdapter(args.provider, {
+    ...(knowledgeMcp ? { knowledgeMcp } : {}),
     // This worker always runs in the hardened Autos container, which is the command boundary for Codex
     // (Codex's own bubblewrap sandbox cannot create user namespaces under Docker's default seccomp profile).
     codexSandbox: 'container',

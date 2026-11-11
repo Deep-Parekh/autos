@@ -425,7 +425,9 @@ export class DockerRunner implements RunnerPort {
     const cancelled = (): ProviderResult => ({ provider: request.provider, role: request.role, status: 'CANCELLED', exit_code: null, elapsed_ms: 0, transcript_path: request.transcript_path, result: null, error_code: 'CANCELLED', ...(request.model ? { model: request.model } : {}) });
     const cacheRoot = toolchain && this.options.dependencyCacheRoot ? await canonical(this.options.dependencyCacheRoot) : undefined;
     const launch = async (stagedAuth: string | undefined): Promise<ProviderResult> => {
-      const envText = [`AUTOS_JOB_ID=${request.job_id}`, `AUTOS_ISSUE_KEY=${request.issue_key}`, `AUTOS_TIMEOUT_MS=${request.timeout_ms}`, `AUTOS_MAX_PROMPT_BYTES=${this.limits.maxPromptBytes}`, `AUTOS_MAX_TRANSCRIPT_BYTES=${this.limits.maxTranscriptBytes}`, 'HOME=/home/worker', ...(stagedAuth ? ['CODEX_HOME=/run/autos/auth'] : []), profileEnv].filter(Boolean).join('\n');
+      const envText = [`AUTOS_JOB_ID=${request.job_id}`, `AUTOS_ISSUE_KEY=${request.issue_key}`, `AUTOS_TIMEOUT_MS=${request.timeout_ms}`, `AUTOS_MAX_PROMPT_BYTES=${this.limits.maxPromptBytes}`, `AUTOS_MAX_TRANSCRIPT_BYTES=${this.limits.maxTranscriptBytes}`, 'HOME=/home/worker', ...(stagedAuth ? ['CODEX_HOME=/run/autos/auth'] : []),
+        // Read-only knowledge tools: the gateway URL and this run's token (validated by the request schema; no newlines possible).
+        ...(request.knowledge ? [`AUTOS_KNOWLEDGE_URL=${request.knowledge.url}`, `AUTOS_KNOWLEDGE_TOKEN=${request.knowledge.token}`] : []), profileEnv].filter(Boolean).join('\n');
       const started = performance.now();
       const name = containerName(request.job_id, request.role);
       this.track(request.job_id, name);
@@ -449,7 +451,9 @@ export class DockerRunner implements RunnerPort {
         throw new AutosError('AUTH', 'Provider authentication profile is unavailable');
       }
       const args = [
-        'run', '--rm', '--init', '--name', name, '--label', `autos.job_id=${request.job_id}`, '--network', this.options.providerNetwork?.name ?? 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+        'run', '--rm', '--init', '--name', name, '--label', `autos.job_id=${request.job_id}`, '--network', this.options.providerNetwork?.name ?? 'none',
+        // The knowledge gateway runs on the host; Docker Desktop resolves this name itself, Linux needs the mapping.
+        ...(request.knowledge && this.options.providerNetwork ? ['--add-host', 'host.docker.internal:host-gateway'] : []), '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
         '--user', `${this.options.uid ?? 10001}:${this.options.gid ?? 10001}`, '--memory', this.limits.memory, '--cpus', this.limits.cpus, '--pids-limit', String(this.limits.pids),
         '--tmpfs', `/tmp:rw,noexec,nosuid,nodev,size=${this.limits.tmpSize},uid=${this.options.uid ?? 10001},gid=${this.options.gid ?? 10001},mode=1777`, '--tmpfs', `/home/worker:rw,nosuid,nodev,size=${this.limits.homeSize},uid=${this.options.uid ?? 10001},gid=${this.options.gid ?? 10001},mode=0700`,
         ...mount(cwd, '/workspace', request.source_access === 'write' ? 'rw' : 'ro'),

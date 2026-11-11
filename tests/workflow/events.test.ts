@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { AutosError, workflowActivitySchema, type JobEvent, parseConfigYaml, type GitWorkspace, type IssueSnapshot, type JobRecord, type ProjectMapping, type ProviderResult, type WorkflowDependencies } from '@autos/contracts';
+import { AutosError, knowledgeConfigSchema, workflowActivitySchema, type JobEvent, parseConfigYaml, type GitWorkspace, type IssueSnapshot, type JobRecord, type ProjectMapping, type ProviderResult, type WorkflowDependencies } from '@autos/contracts';
 import { FileArtifactStore, SqliteJobStore, WorkflowService } from '../../packages/workflow/src/index.js';
 
 let root: string;
@@ -288,5 +288,45 @@ describe('progress events', () => {
     assert.throws(() => store.appendEvent({ type: 'poll_finished', job_id: null, issue_key: null, outcome: 'bad value!' }, '2026-11-07T20:00:00.000Z'));
     assert.equal(store.events({ limit: 10 }).length, 1);
     store.close();
+  });
+});
+
+describe('knowledge tool sessions', () => {
+  it('opens one session per role run, passes it to the runner, revokes it afterwards, announces the tools and writes the audit', async () => {
+    config.knowledge = knowledgeConfigSchema.parse({ enabled: true, roles: ['swe', 'qa'], confluence: { spaces: ['KB'] } });
+    const script = newScript(['SAMPLE-95']); const { store, artifacts } = open(script, 'knowledge.sqlite');
+    const d = deps(script, store, artifacts); const original = d.runner.runRole.bind(d.runner);
+    const opened: string[] = []; const closed: string[] = []; const seenByRunner: Array<{ role: string; token: string | undefined; live: boolean }> = [];
+    d.knowledge = {
+      open: (scope) => { if (scope.role === 'reviewer') return null; const token = `${scope.role}-${'t'.repeat(40)}`; opened.push(token); return { url: 'http://host.docker.internal:8791', token }; },
+      close: (token) => { closed.push(token); return token.startsWith('swe') ? { calls: 2, chars: 120, entries: [{ at: '2026-11-07T20:00:00.000Z', tool: 'jira_get_comments', target: 'SAMPLE-95', outcome: 'OK', chars: 120, elapsed_ms: 5 }, { at: '2026-11-07T20:00:01.000Z', tool: 'confluence_search', target: 'query:12', outcome: 'FORBIDDEN', chars: 0, elapsed_ms: 1 }] } : { calls: 0, chars: 0, entries: [] }; },
+    };
+    d.runner.runRole = async (req, signal, onProgress) => { seenByRunner.push({ role: req.role, token: req.knowledge?.token, live: req.knowledge ? !closed.includes(req.knowledge.token) : false }); return original(req, signal, onProgress); };
+    const service = new WorkflowService(d);
+    const job = await service.execute((await service.submit('SAMPLE-95', false)).job_id);
+    assert.equal(job.state, 'READY_FOR_HUMAN');
+    assert.deepEqual(seenByRunner.map((r) => [r.role, r.token !== undefined, r.live]), [['swe', true, true], ['qa', true, true], ['reviewer', false, false]]);
+    assert.deepEqual(closed, opened, 'every session is revoked');
+    const prompt = (role: string) => script.prompts.find((p) => p.role === role)!.text;
+    assert.match(prompt('swe'), /Knowledge tools \(read-only\)[\s\S]*Confluence pages[\s\S]*untrusted reference data/);
+    assert.match(prompt('qa'), /Knowledge tools \(read-only\)/);
+    assert.doesNotMatch(prompt('reviewer'), /Knowledge tools/);
+    const audit = JSON.parse(await readFile(join(config.storage.artifacts_dir, job.job_id, 'knowledge-audit.json'), 'utf8'));
+    assert.equal(audit.runs.length, 1); assert.equal(audit.runs[0].role, 'swe'); assert.equal(audit.runs[0].calls, 2);
+    assert.deepEqual(audit.runs[0].entries.map((e: { outcome: string }) => e.outcome), ['OK', 'FORBIDDEN']);
+    store.close();
+  });
+  it('a failing knowledge port never changes the outcome, and without one prompts are unchanged', async () => {
+    config.knowledge = knowledgeConfigSchema.parse({ enabled: true });
+    const script = newScript(['SAMPLE-96']); const { store, artifacts } = open(script, 'knowledge2.sqlite');
+    const d = deps(script, store, artifacts);
+    d.knowledge = { open: () => { throw new Error('gateway down'); }, close: () => { throw new Error('gateway down'); } };
+    const service = new WorkflowService(d);
+    assert.equal((await service.execute((await service.submit('SAMPLE-96', false)).job_id)).state, 'READY_FOR_HUMAN');
+    store.close();
+    const plain = newScript(['SAMPLE-97']); const second = open(plain, 'knowledge3.sqlite');
+    assert.equal((await second.service.execute((await second.service.submit('SAMPLE-97', false)).job_id)).state, 'READY_FOR_HUMAN');
+    assert.ok(plain.prompts.every((p) => !/Knowledge tools/.test(p.text)), 'no gateway, no announcement');
+    second.store.close();
   });
 });
