@@ -15,6 +15,7 @@
     "@autos/cli-adapters": "0.1.0",
     "@autos/contracts": "0.1.0",
     "@autos/git-runner": "0.1.0",
+    "@autos/precedents": "0.1.0",
     "@autos/runner": "0.1.0",
     "@autos/workflow": "0.1.0",
     "@fastify/swagger": "9.9.3",

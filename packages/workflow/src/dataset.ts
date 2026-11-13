@@ -2,7 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { lstat, readdir, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { AutosError, datasetExportOptionsSchema, datasetRecordSchema, jobIdSchema, providerCallSchema, type AutosConfig, type DatasetExportOptions, type DatasetRecord } from '@autos/contracts';
+import { AutosError, datasetExportOptionsSchema, datasetRecordSchema, jobIdSchema, providerCallSchema, semanticPrecedentResultSchema, type AutosConfig, type DatasetExportOptions, type DatasetRecord } from '@autos/contracts';
 
 type Outcome = DatasetRecord['outcome'];
 type Note = DatasetRecord['operator_notes'][number];
@@ -74,6 +74,11 @@ async function callsOf(privateRoot: string, include: { prompts: boolean; transcr
   return found.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : a.mtime - b.mtime)).map((item) => item.call);
 }
 
+async function precedentFields(json: (name: string) => Promise<unknown>): Promise<{ precedent_keys?: string[]; precedent_kinds?: string[] }> {
+  const parsed = semanticPrecedentResultSchema.safeParse(await json('precedents.json'));
+  return parsed.success ? { precedent_keys: parsed.data.items.map((i) => i.issue_key), precedent_kinds: parsed.data.items.map((i) => i.kind) } : {};
+}
+
 /**
  * Streams one dataset record per non-dry-run, finished attempt (oldest first). Reads the SQLite database read-only (safe while the
  * controller runs) and the artifacts directory without following symlinks. Missing or malformed artifacts become null.
@@ -124,6 +129,8 @@ export async function* exportDataset(input: { config: AutosConfig; options: Data
         instructions: await text('effective-instructions.md'), precedents: await text('precedents.md'), final_diff: await text('changes.patch'),
         calls: dirOk ? await callsOf(join(jobDir, '_private'), { prompts: options.include_prompts, transcripts: options.include_transcripts }) : [],
         timeline,
+        // Semantic precedents shown for this attempt; the fields are omitted entirely without a valid precedents.json (legacy).
+        ...(await precedentFields(json)),
       };
       const parsed = datasetRecordSchema.safeParse(record);
       if (!parsed.success) throw new AutosError('INVALID_OUTPUT', `Dataset record for job ${jobId} failed validation`);

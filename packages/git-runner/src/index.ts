@@ -2,7 +2,7 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, readFile, realpath, rm, readlink, readdir } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
@@ -13,6 +13,10 @@ import {
   type GitCandidate, type GitCommitRequest, type GitCommitResult, type GitPrepareRequest, type GitReopenRequest,
   type GitPushResult, type GitRunnerPort, type GitWorkspace, type RepositoryConfig, type RepositoryInstructionFile,
 } from '@autos/contracts';
+
+import { buildGitEnv, classifyGitFailure, isApprovedBitbucketRemote } from './exec.js';
+
+export * from './lineage.js';
 
 const execFile = promisify(execFileCallback);
 const shaSchema = gitShaSchema;
@@ -80,22 +84,6 @@ export function policyViolationPaths(error: unknown): string[] | null {
 function sanitizeViolationPaths(paths: string[]): string[] {
   const safe = paths.filter((path) => path.length <= 1024 && relativePathSchema.safeParse(path).success && !/[\u0000-\u001f\u007f]/.test(path));
   return [...new Set(safe)].sort().slice(0, MAX_VIOLATION_PATHS);
-}
-
-/** Maps a failed Git process to a safe, authored error. Never includes stderr text, URLs or tokens. */
-function classifyGitFailure(e: { code?: number | string; killed?: boolean; signal?: string | null; stderr?: Buffer | string }, label?: string): AutosError {
-  if (e.code === 'ENOENT') return new AutosError('UNAVAILABLE', 'Git executable is unavailable');
-  if (e.code === 'ETIMEDOUT' || (e.killed === true && e.signal === 'SIGTERM')) return new AutosError('TIMEOUT', 'Git operation timed out', { retryable: true });
-  const text = String(e.stderr ?? '');
-  if (/authentication failed|\b40[13]\b|could not read (username|password)|permission denied \(publickey|terminal prompts disabled|invalid credentials/i.test(text)) {
-    return new AutosError('AUTH', `Git authentication failed for ${label ?? 'the repository'}`);
-  }
-  if (/couldn't find remote ref|remote branch .* not found/i.test(text)) return new AutosError('MAPPING', 'Development branch not found on the remote');
-  if (/repository .*not found|\b404\b/i.test(text)) return new AutosError('NOT_FOUND', 'Git repository not found on the remote');
-  if (/could not resolve host|connection refused|connection timed out|operation timed out|network is unreachable|failed to connect|connection reset|temporary failure in name resolution|could not resolve hostname/i.test(text)) {
-    return new AutosError('UPSTREAM', 'Git remote unreachable', { retryable: true });
-  }
-  return new AutosError('UPSTREAM', 'Git operation failed', { retryable: true });
 }
 
 export interface PruneWorkspacesOptions {
@@ -611,11 +599,7 @@ export class GitRunner implements GitRunnerPort {
   private resolveRemote(remote: string, identity: string): string {
     const testOverride = this.testRemotes.get(identity);
     if (testOverride) return testOverride;
-    let parsed: URL | null = null;
-    try { parsed = new URL(remote); } catch { /* checked below */ }
-    if (parsed && parsed.protocol === 'https:' && parsed.hostname === 'bitbucket.org' && !parsed.username && !parsed.password && !parsed.search && !parsed.hash && /^\/[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\.git$/.test(parsed.pathname)) return remote;
-    const ssh = /^git@bitbucket\.org:([A-Za-z0-9_-]+)\/([A-Za-z0-9_-]+)\.git$/.exec(remote);
-    if (ssh) return remote;
+    if (isApprovedBitbucketRemote(remote)) return remote;
     throw new AutosError('POLICY', 'Repository remote is not an approved Bitbucket URL');
   }
 
@@ -863,17 +847,7 @@ export class GitRunner implements GitRunnerPort {
   }
 
   private gitEnv(cwd: string, extras: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-    const path = process.env.PATH ?? '/usr/bin:/bin';
-    return {
-      PATH: path, HOME: homedir(), TMPDIR: tmpdir(), LANG: 'C.UTF-8', LC_ALL: 'C',
-      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
-      GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_ATTR_NOSYSTEM: '1',
-      GIT_NO_REPLACE_OBJECTS: '1',
-      GIT_ALLOW_PROTOCOL: this.testRemotes.size ? 'https:ssh:file' : 'https:ssh', GIT_CEILING_DIRECTORIES: dirname(cwd),
-      ...(this.trustedCredentials?.gitAskPassPath ? { GIT_ASKPASS: this.trustedCredentials.gitAskPassPath } : {}),
-      ...(this.trustedCredentials?.sshAuthSocket ? { SSH_AUTH_SOCK: this.trustedCredentials.sshAuthSocket } : {}),
-      ...extras,
-    };
+    return buildGitEnv(cwd, { credentials: this.trustedCredentials, allowFileProtocol: this.testRemotes.size > 0 }, extras);
   }
 
   private isWithin(root: string, path: string): boolean {

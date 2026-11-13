@@ -8,7 +8,9 @@ import { AutosError, DATASET_OUTCOMES, EFFORT_LEVELS, effortSchema, formatTierSt
 import type { OperatorNoteRequest, WorkflowServicePort } from '@autos/contracts';
 import type { ControllerOptions, LoopStatus, ProviderDiagnostic, StatusResponse } from '@autos/controller';
 import { pollDelayMs, runControllerLoop, waitForSignalOrTimeout, type LoopSleep } from './loop.js';
+import { confluenceDraftsDoctorChecks, precedentsDoctorChecks } from './precedents-doctor.js';
 import { deepChecks, formatChecks, type CheckResult, type DeepDoctorDeps } from './deep-doctor.js';
+import { confluenceCommand, indexCommand, lineageCommand, precedentsCommand, type PrecedentCommandContext } from './precedents.js';
 import { buildAgentProgressMessage, buildLifecycleMessage, buildTeamsMessage, cursorPath, EntraTokenSource, notificationKind, parseTeamsWebhookUrl, postTeamsMessage, readRelayState, TierTracker, writeRelayState, type FetchLike, type LifecycleFacts } from './teams.js';
 
 export interface CliRuntime extends Omit<ControllerOptions, 'operatorToken' | 'fastifyOptions' | 'bindHost'> {
@@ -39,6 +41,8 @@ export interface CliDependencies {
   now?(): number;
   /** Test seams for `autos teams`: the webhook HTTP client and the delivery retry base delay. */
   teamsFetch?: FetchLike;
+  /** Test seam: timing of the precedent index loop in `controller start` (default: first tick after 5 s, then every minute). */
+  indexLoop?: { initialDelayMs?: number; intervalMs?: number };
   /** Test seam for controller API/SSE calls; production uses global fetch. */
   controllerFetch?: FetchLike;
   teamsRetryDelayMs?: number;
@@ -110,7 +114,17 @@ Commands:
                                   needs running controller; resumes after the last posted event; Ctrl-C to stop)
   teams test                      Post one test card to the configured Teams webhook
   events [--job JOB_ID] [--after N] [--limit N] [--url URL]  List persisted progress events
-  controller start                Run the local API and polling loop
+  index status | sync [--full] [--reconcile] | rebuild [--yes] | purge --project KEY [--yes] [--url URL]
+                                  Precedent index (precedents config) in the running controller: status, start a sync
+                                  or rebuild (runs in the background), or delete one project's indexed issues now
+  lineage show [--url URL]        Code lineages: project branches, fork points, attached dev/sbx branches
+  precedents search (--issue KEY | --text "...") [--limit N] [--include-unresolved] [--no-judge] [--explain] [--url URL]
+                                  Search earlier fixes and similar reports (operator view; needs running controller)
+  precedents show KEY [--url URL] Show one indexed issue (summary, error signatures, fixes, presence per branch)
+  confluence draft JOB_ID|ISSUE-KEY [--url URL]
+                                  Create the Confluence fix-document draft of a READY_FOR_HUMAN attempt. The draft is
+                                  visible only to the token's Atlassian account; you publish it yourself in Confluence
+  controller start                Run the local API and polling loop (and the precedent index loop when configured)
   docs validate                   Check generated OpenAPI against docs/openapi.yaml
   docs preview                    Print a local API reference
   --help, --version`;
@@ -220,15 +234,21 @@ async function doctor(config: AutosConfig, env: NodeJS.ProcessEnv, cwd: string, 
   });
   const warnings = roles.flatMap(({ role, chain }) => chain.filter((entry) => !entry.binary_present && entry.chain_index > 0).map((entry) => `${role}: fallback provider ${entry.provider} (chain position ${entry.chain_index}) binary not found; the fallback will be unavailable`)
     .concat(chain.some((entry) => entry.binary_present) && !chain[0]!.binary_present ? [`${role}: primary provider ${chain[0]!.provider} binary not found; the role starts from a fallback`] : []));
+  // Precedents / Confluence drafts: only when configured, so doctor output is unchanged without them. WARN only.
+  const precedentChecks = await precedentsDoctorChecks(config, cwd);
+  const draftChecks = confluenceDraftsDoctorChecks(config);
+  const optionalWarnings = [...precedentChecks, ...draftChecks].filter((check) => check.status !== 'PASS').map((check) => `${check.name}: ${check.message}`);
   return {
     config_valid: true,
     env_references: requiredEnv.map((name) => ({ name, present: Boolean(env[name]) })),
     providers,
     roles,
-    warnings: supervised ? [`provider binaries ${SUPERVISED_NOTE}`, ...warnings] : warnings,
+    warnings: [...(supervised ? [`provider binaries ${SUPERVISED_NOTE}`, ...warnings] : warnings), ...optionalWarnings],
     provider_checks: supervised ? 'supervisor' : 'host',
     authentication: 'not checked; doctor never invokes providers or authenticates accounts',
     read_only_smoke: 'NOT_RUN',
+    ...(precedentChecks.length ? { precedents: precedentChecks } : {}),
+    ...(draftChecks.length ? { confluence_drafts: draftChecks } : {}),
   };
 }
 
@@ -334,11 +354,18 @@ function httpFailure(status: number): AutosError {
  * unknown tier or a step below the floor). The message is controller-authored; it is length-capped and stripped of control
  * characters, and any other status still maps to the generic failures.
  */
-async function controllerFetch(url: URL, token: string, init: { signal?: AbortSignal; headers?: Record<string, string>; method?: string; body?: string; reason?: boolean } = {}, fetcher: FetchLike = (input, request) => fetch(input, request)): Promise<Response> {
+async function controllerFetch(url: URL, token: string, init: { signal?: AbortSignal; headers?: Record<string, string>; method?: string; body?: string; reason?: boolean; explain?: boolean } = {}, fetcher: FetchLike = (input, request) => fetch(input, request)): Promise<Response> {
   let response: Response;
   try { response = await fetcher(url, { signal: init.signal ?? null, method: init.method ?? 'GET', ...(init.body !== undefined ? { body: init.body } : {}), headers: { authorization: `Bearer ${token}`, ...init.headers } }); }
   catch (error) { if (init.signal?.aborted) throw error; throw unreachable(); }
   if (!response.ok) {
+    if (init.explain && (response.status === 400 || response.status === 404 || response.status === 409)) {
+      // `explain`: the controller's own message (e.g. "Precedent index is not configured") is shown; length-capped, no control characters.
+      const body: unknown = await response.json().catch(() => null);
+      const message = isRecord(body) && typeof body.message === 'string' ? body.message.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 300) : '';
+      if (message) throw new AutosError(response.status === 404 ? 'NOT_FOUND' : response.status === 409 ? 'CONFLICT' : 'INVALID_INPUT', `Controller: ${message}`);
+      throw httpFailure(response.status);
+    }
     if (response.status === 409) {
       // The controller explains conflicts (note limit, closed issue, active attempt); show its reason when it gave one.
       const body: unknown = await response.json().catch(() => null);
@@ -1182,6 +1209,28 @@ async function notesCommand(args: string[], config: AutosConfig, json: boolean, 
   return 0;
 }
 
+/** Runs one `autos index|lineage|precedents|confluence` command against the controller API. */
+async function precedentApiCommand(run: (args: string[], ctx: PrecedentCommandContext) => Promise<number>, args: string[], config: AutosConfig, json: boolean, dependencies: CliDependencies, stdout: (text: string) => void): Promise<number> {
+  const rest: string[] = []; let url: string | undefined;
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === '--url' && url === undefined) {
+      const value = args[++index];
+      if (value === undefined || value.startsWith('--')) throw new AutosError('INVALID_INPUT', '--url requires a value');
+      url = value;
+    } else rest.push(args[index]!);
+  }
+  let base: URL | undefined; let token: string | undefined;
+  const target = () => { base ??= controllerBase(config, url); token ??= operatorToken(config, dependencies); return { base, token }; };
+  const call = async (path: string, method: 'GET' | 'POST', body?: unknown): Promise<unknown> => {
+    const { base: root, token: bearer } = target();
+    return controllerJson(endpoint(root, path), bearer, { method, explain: true, ...(body !== undefined ? { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : {}) }, dependencies.controllerFetch);
+  };
+  return run(rest, {
+    api: { get: (path) => call(path, 'GET'), post: (path, body) => call(path, 'POST', body) },
+    json, stdout, interactive: dependencies.stdinIsTTY ?? process.stdin.isTTY === true, prompt: dependencies.prompt ?? defaultPrompt, now: dependencies.now?.() ?? Date.now(),
+  });
+}
+
 const workspacesUsage = 'Usage: autos workspaces [--sizes] [--url URL] | autos workspaces prune [--dry-run] [--older-than HOURS] [--sizes] [--url URL]';
 async function workspacesCommand(args: string[], config: AutosConfig, json: boolean, dependencies: CliDependencies, stdout: (text: string) => void): Promise<number> {
   const token = () => operatorToken(config, dependencies);
@@ -1297,6 +1346,10 @@ export async function main(args: string[], dependencies: CliDependencies = {}): 
     if (commandArgs[0] === 'notes') return await notesCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout);
     if (commandArgs[0] === 'show') return await showCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout);
     if (commandArgs[0] === 'workspaces') return await workspacesCommand(commandArgs.slice(1), config, parsed.json, dependencies, stdout);
+    if (commandArgs[0] === 'index') return await precedentApiCommand(indexCommand, commandArgs.slice(1), config, parsed.json, dependencies, stdout);
+    if (commandArgs[0] === 'lineage') return await precedentApiCommand(lineageCommand, commandArgs.slice(1), config, parsed.json, dependencies, stdout);
+    if (commandArgs[0] === 'precedents') return await precedentApiCommand(precedentsCommand, commandArgs.slice(1), config, parsed.json, dependencies, stdout);
+    if (commandArgs[0] === 'confluence') return await precedentApiCommand(confluenceCommand, commandArgs.slice(1), config, parsed.json, dependencies, stdout);
     if (commandArgs[0] === 'doctor' && (commandArgs.length === 1 || (commandArgs.length === 2 && commandArgs[1] === '--deep'))) {
       const deep = commandArgs.length === 2;
       const env = dependencies.env ?? process.env;
@@ -1385,7 +1438,7 @@ export async function main(args: string[], dependencies: CliDependencies = {}): 
       const operatorToken = (dependencies.env ?? process.env)[config.api.operator_token_env] ?? '';
       if (operatorToken.length < 16) throw new AutosError('INVALID_CONFIG', `Operator token environment variable ${config.api.operator_token_env} must be set to at least 16 characters`);
       const loop: LoopStatus = { running: false, next_poll_at: null, consecutive_failures: 0, auto_poll: config.jira.auto_poll, last_discovery_at: null };
-      const app = await controller.createController({ ...svc, ...(bindHost ? { bindHost } : {}), operatorToken, loopStatus: () => ({ ...loop }), logStream: { write: (line) => stderr(line.replace(/\n$/, '')) } });
+      const app = await controller.createController({ ...svc, ...(bindHost ? { bindHost } : {}), operatorToken, loopStatus: () => ({ ...loop }), indexLoop: dependencies.indexLoop ?? {}, logStream: { write: (line) => stderr(line.replace(/\n$/, '')) } });
       const abort = new AbortController();
       const stop = () => abort.abort();
       const external = dependencies.signal;

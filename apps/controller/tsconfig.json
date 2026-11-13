@@ -23,6 +23,9 @@
     },
     {
       "path": "../../packages/runner"
+    },
+    {
+      "path": "../../packages/precedents"
     }
   ],
   "include": [

@@ -25,6 +25,14 @@ autos jobs show JOB_ID [--config PATH]
 autos jobs cancel JOB_ID [--config PATH]
 autos queue list [--limit 1..100] [--config PATH]
 autos controller start [--config PATH]
+autos index status [--url URL] [--json] [--config PATH]
+autos index sync [--full] [--reconcile] [--url URL] [--json] [--config PATH]
+autos index rebuild [--yes] [--url URL] [--json] [--config PATH]
+autos index purge --project KEY [--yes] [--url URL] [--json] [--config PATH]
+autos lineage show [--url URL] [--json] [--config PATH]
+autos precedents search (--issue KEY | --text "...") [--limit 1..20] [--include-unresolved] [--no-judge] [--explain] [--url URL] [--json] [--config PATH]
+autos precedents show KEY [--url URL] [--config PATH]
+autos confluence draft JOB_ID|ISSUE-KEY [--url URL] [--json] [--config PATH]
 autos status [--url URL] [--json] [--config PATH]
 autos watch [--job JOB_ID] [--quiet-progress] [--url URL] [--json] [--config PATH]
 autos teams relay [--from-start] [--url URL] [--config PATH]
@@ -82,7 +90,7 @@ Exit code is non-zero when any check is FAIL or the base checks fail. Text mode 
 
 ## Logging
 
-`controller start` writes structured JSON log lines to stderr: one line per request (`request_id`, `method`, route pattern, `status`, `duration_ms`), `auth_rejected` for a rejected token (the presented token is never logged), and `audit` lines for job submit, revise, cancel, retry, issue close, workspace prune and tier pin set/clear (ids, counts, resolution, role, tier and effort only) with job id, issue key and the actor label (`X-Autos-Operator`, default `operator`). Headers, bodies, tokens, query strings and operator note text are never logged. See [api-publishing.md](api-publishing.md).
+`controller start` writes structured JSON log lines to stderr: one line per request (`request_id`, `method`, route pattern, `status`, `duration_ms`), `auth_rejected` for a rejected token (the presented token is never logged), and `audit` lines for job submit, revise, cancel, retry, issue close, workspace prune, tier pin set/clear, index sync/rebuild/purge and Confluence drafts (ids, counts, resolution, role, tier, effort, project key and page id only) with job id, issue key and the actor label (`X-Autos-Operator`, default `operator`). Headers, bodies, tokens, query strings and operator note text are never logged; neither are precedent search text, search results or draft content and links. The precedent index loop adds `index_tick` and `index_operation` lines with counts, durations and codes. See [api-publishing.md](api-publishing.md).
 
 `autos watch` prints live agent actions from `role_progress` events, for example `19:46:02 CMS2-1495 swe/codex: ran rg -n assocType (12 commands so far)`. Use `--quiet-progress` to hide these frequent action lines while keeping stage and job events. `autos status` adds the latest action and its age under each active job when one has been recorded.
 
@@ -278,6 +286,22 @@ Privacy: the dataset contains company source code (diffs and prompts), ticket te
 
 Artifacts, including the private per-invocation prompt and transcript files that feed the export, are never removed automatically or by any `autos` command, so the dataset keeps accumulating. Plan disk space accordingly and remove old job directories yourself if you must.
 
+## Precedent index and Confluence drafts
+
+These commands exist only when `precedents` is configured (see [semantic-precedents-plan.md](semantic-precedents-plan.md)); without it every command, endpoint and log line behaves as before. Like `status`, they are thin clients of the running controller's API (the index lives in the controller process): base URL from `api.listen_host`/`api.port` or `--url`, bearer token from `api.operator_token_env`. When the controller has no precedent index the API answers 404 and the CLI exits 1 with `Controller: Precedent index is not configured ...`.
+
+Background loop: when `precedents.enabled` and `precedents.index.auto_sync` (the default) are true, `controller start` runs one index tick about 5 seconds after start and then every minute. The index decides what is due (incremental Jira sync every `index.sync_interval_minutes`, mirror scan, reconcile every `index.reconcile_interval_hours`). Ticks are single-flight (a tick never overlaps another tick or a manual sync/rebuild), never block job execution or the poller, survive errors, and stop on shutdown (the running tick is aborted). Each tick logs one `index_tick` line with `outcome`, `duration_ms`, counts (`issues`, `vectors`, `fixes`, `ready`) and error codes only. With `auto_sync: false` the index changes only through `autos index sync`.
+
+- `autos index status` prints readiness, counts (issues, chunks, vectors, fixes, projects), the embedding model, the last sync/full sync/reconcile/mirror scan times, the last error code, the background loop and the running or last manual operation with its per-mode reports (upserted, deleted, embedded, fixes, requests, complete, error).
+- `autos index sync [--full] [--reconcile]` starts a sync in the controller and returns at once (HTTP 202); follow it with `autos index status`. `--full` re-reads the whole window; `--reconcile` also removes issues that were deleted, moved or became restricted. It is refused (exit 1, `CONFLICT`) while another index operation runs or when `precedents.enabled` is false.
+- `autos index rebuild [--yes]` discards the local index and rebuilds it in the background (search answers `INDEX_NOT_READY` until it finishes; hours on CPU). `autos index purge --project KEY [--yes]` deletes every indexed issue of one Jira project now; add the project to `precedents.index.exclude_projects` to keep it out of later syncs. Both ask for confirmation on a terminal and require `--yes` otherwise (exit 2 without it); they audit counts only.
+- `autos lineage show` lists lineage nodes: lineage, Jira project, development branch, fork point and date, attached `_dev`/`_sbx` branches and how they were attached, plus unattached branches and missing configured items.
+- `autos precedents search (--issue KEY | --text "...")` runs the retrieval pipeline as the operator: shown fix precedents (kind, key, status, score, judge verdict, signals, fix commit and branch, summary), "Same bug may be open in other projects" (`ALSO_REPORTED`, never given to agents), related fixes (search only) and rejected candidates with the reason. `--no-judge` skips the provider judge (no ticket text leaves the host), `--limit` caps candidates, `--include-unresolved` also considers unresolved tickets, `--explain` adds one JSON line per candidate. The search text is sent in the request body and never logged.
+- `autos precedents show KEY` prints the index record of one issue as JSON (summary, error signatures, code references, fixes, presence per node); exit 1 with `NOT_FOUND` when the issue is not indexed.
+- `autos confluence draft JOB_ID|ISSUE-KEY` creates the Confluence fix-document draft of a `READY_FOR_HUMAN` attempt (an issue key means its latest one) and prints the page id and the edit link. **The draft is unpublished and visible only to the Atlassian account whose token the controller uses** (on the Mac pilot, your own account). Open the link, review and edit it, and **publish it yourself in Confluence**: Autos never publishes, never updates a page that was published or edited (it creates a new draft instead and says which page it supersedes) and never deletes anything. It needs `confluence.drafts.enabled`; otherwise exit 1 with `Controller: Confluence drafts are not configured ...`.
+
+`autos doctor` adds a `precedents` list when `precedents` is configured (all offline): config summary, index file presence and permissions (`<data_dir>/<index.db_file>`, expected 0600), lineage repositories in `bitbucket.allowed_repositories`, embedding provider/model, and an uncalibrated gate. It adds `confluence_drafts` when `confluence.drafts` is configured. Missing optional pieces are warnings (also listed in `warnings`), never failures. `autos doctor --deep` adds `precedents_index` (status through the runtime's index: readiness, counts, last error) and `precedents_lineage` (node count, missing items, unattached branches), again as warnings when something is missing.
+
 ## Operator monitoring over SSH
 
 `status`, `watch`, and `events` are thin HTTP clients of the running controller; they do not build the workflow runtime or touch the database. They read the base URL from `api.listen_host`/`api.port` in the config (or `--url`) and the bearer token from the environment variable named by `api.operator_token_env`. If the controller is not running they exit 1 with "Autos controller is not reachable"; a rejected token exits 1 with `AUTH`.
@@ -296,6 +320,6 @@ By default Autos works on one ticket at a time (`jobs.max_parallel: 1`). On a la
 
 ## Verification status
 
-Fake-tested only (`tests/interfaces`): command parsing, exit codes, sanitization, `jobs show/cancel`, poll backoff, loopback binding, authenticated HTTP, graceful shutdown, and OpenAPI parity. These tests use fake workflow services; they do not prove autonomous operation.
+Fake-tested only (`tests/interfaces`): command parsing, exit codes, sanitization, `jobs show/cancel`, poll backoff, loopback binding, authenticated HTTP, graceful shutdown, and OpenAPI parity. The precedent index, lineage, search and Confluence draft commands and endpoints and the background index loop are tested with a fake index and a fake draft method only; no Jira, Bitbucket, embedding service, provider or Confluence was called. These tests use fake workflow services; they do not prove autonomous operation.
 
 Not verified here: a real Jira filter or Confluence mapping, Bitbucket access, any real coding provider, or the Docker runner. Docker is not installed on the development machine. The real execution path goes through the Unix-socket `DockerRunnerClient` and a host supervisor that must be running; without it `run`, `providers test --all`, and controller job execution cannot complete real work. `autos doctor` reports `read_only_smoke: NOT_RUN` and does not authenticate. Do not treat this CLI as a working autonomous service against real Jira until the pilot checks in the implementation plan have been run.

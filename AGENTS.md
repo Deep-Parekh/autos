@@ -9,7 +9,7 @@ The primary agent owns root manifests, lockfiles, configuration, packages/contra
 ## Implementation rules
 
 - Use TypeScript strict mode and exported @autos/contracts types. Use Zod schemas at trust boundaries. Errors and logs must not contain tokens, credential-bearing URLs, or raw upstream response bodies.
-- Jira and Confluence clients expose reads only. No PR creation, merge, rebase, force-push, or deployment operations. Push is disabled by default and belongs to trusted Git code.
+- Jira and Confluence clients expose reads only. Single exception (user decision 2026-11-12, docs/semantic-precedents-plan.md §12): a separate Confluence draft writer may create pages with status "draft" in one configured space/parent and update only drafts it created that are still drafts. It never publishes, deletes, or touches other pages, is off by default, and is never exposed to agents. No PR creation, merge, rebase, force-push, or deployment operations. Push is disabled by default and belongs to trusted Git code.
 - Invoke processes with argument arrays, never interpolated shell commands. Roles use fresh sessions. Provider narrative is not deterministic test evidence.
 - Agent permission enforcement belongs to the trusted runner. A direct subprocess adapter is not an isolation boundary and must not be wired to production job execution before task F.
 - Only SWE may edit ticket source; QA/reviewer get source-read access and separate output locations. Infrastructure credentials stay outside agent workspaces.

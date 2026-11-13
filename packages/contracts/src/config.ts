@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { confluenceDraftsConfigSchema, precedentsConfigSchema } from './precedents.js';
 import { knowledgeConfigSchema } from './knowledge.js';
 import { parseDocument } from 'yaml';
 import { AutosError } from './errors.js';
@@ -230,7 +231,9 @@ const configObjectSchema = z.strictObject({
     max_new_per_poll: z.number().int().min(1).max(100).default(10),
     username_env: envNameSchema, token_env: envNameSchema,
   }),
-  confluence: z.strictObject({ site_url: siteUrlSchema, branch_map_page_id: z.string().regex(/^[0-9]+$/), read_only: z.literal(true), username_env: envNameSchema, token_env: envNameSchema }),
+  confluence: z.strictObject({ site_url: siteUrlSchema, branch_map_page_id: z.string().regex(/^[0-9]+$/), read_only: z.literal(true), username_env: envNameSchema, token_env: envNameSchema,
+    /** Fix-document drafts (docs/semantic-precedents-plan.md §12): drafts only, never published by Autos; off unless configured. */
+    drafts: confluenceDraftsConfigSchema.optional() }),
   bitbucket: z.strictObject({ allowed_repositories: z.array(repositoryConfigSchema).min(1), push_feature_branch: z.boolean().default(false), /** Push the unreviewed work of a BLOCKED attempt (after its agent ran) to the feature branch, so humans can inspect it; retries continue from it. */ push_blocked_attempts: z.boolean().default(false), create_pull_request: z.literal(false), read_token_env: envNameSchema.optional() }),
   git: z.strictObject({ branch_template: z.literal('deep/{issueKey}'), no_rebase: z.literal(true), no_force_push: z.literal(true), refuse_existing_feature_branch: z.literal(true) }),
   providers: z.strictObject({ claude: binarySchema, codex: binarySchema, cursor: binarySchema }),
@@ -276,6 +279,8 @@ const configObjectSchema = z.strictObject({
       .default({ initial_minutes: 15, max_minutes: 240, max_total_hours: 24 }),
   }).refine((jobs) => (jobs.max_concurrent_checks ?? 1) <= jobs.max_parallel, { message: 'max_concurrent_checks must not exceed max_parallel', path: ['max_concurrent_checks'] }),
   build_profiles: z.record(identifierSchema, z.strictObject({ jdk: jdkVersionSchema.optional(), tomcat: tomcatVersionSchema.optional(), checks: z.array(checkCommandSchema).min(1) })),
+  /** Semantic precedent search (docs/semantic-precedents-plan.md). Absent = the legacy jobs.similar_tickets lookup. */
+  precedents: precedentsConfigSchema.optional(),
   security: z.strictObject({ allow_jira_write: z.literal(false), allow_confluence_write: z.literal(false), allow_merge: z.literal(false), allow_deploy: z.literal(false), allow_prod_db: z.literal(false) }),
   storage: z.strictObject({ data_dir: z.string().min(1), artifacts_dir: z.string().min(1), workspaces_dir: z.string().min(1) }),
   api: z.strictObject({ listen_host: z.enum(['127.0.0.1', '::1']), port: z.number().int().min(1024).max(65535), operator_token_env: envNameSchema }),
@@ -297,6 +302,9 @@ export const configSchema = configObjectSchema.superRefine((config, ctx) => {
     repositories.add(id);
     if (!config.build_profiles[repo.build_profile]) ctx.addIssue({ code: 'custom', path: ['bitbucket', 'allowed_repositories', i, 'build_profile'], message: 'Unknown build profile' });
   });
+  config.precedents?.lineages.forEach((lineage, i) => {
+    if (!config.bitbucket.allowed_repositories.some((repo) => repo.workspace === lineage.repository.workspace && repo.repository_slug === lineage.repository.repository_slug)) ctx.addIssue({ code: 'custom', path: ['precedents', 'lineages', i, 'repository'], message: 'Lineage repository must be in bitbucket.allowed_repositories' });
+  });
   if (new Set(config.jira.allowed_projects).size !== config.jira.allowed_projects.length) ctx.addIssue({ code: 'custom', path: ['jira', 'allowed_projects'], message: 'Duplicate project' });
   const dirs = Object.values(config.storage).map((dir) => dir.replace(/\/+$/, ''));
   if (new Set(dirs).size !== dirs.length) ctx.addIssue({ code: 'custom', path: ['storage'], message: 'Storage directories must be distinct' });
@@ -314,6 +322,7 @@ export const configSchema = configObjectSchema.superRefine((config, ctx) => {
     qa: resolveRole(config.agents.qa, tiers, ctx, ['agents', 'qa']),
     reviewer: resolveRole(config.agents.reviewer, tiers, ctx, ['agents', 'reviewer']),
   };
+  { const judgeTier = config.precedents?.judge.tier?.split(':')[0]; if (judgeTier && !Object.hasOwn(config.model_tiers, judgeTier)) ctx.addIssue({ code: 'custom', path: ['precedents', 'judge', 'tier'], message: 'Unknown model tier' }); }
   if (config.triage && !Object.hasOwn(config.model_tiers, config.triage.tier)) ctx.addIssue({ code: 'custom', path: ['triage', 'tier'], message: 'Unknown model tier' });
   return { ...config, model_tiers: tiers, agents };
 });

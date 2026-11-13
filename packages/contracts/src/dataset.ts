@@ -79,6 +79,9 @@ export const datasetRecordSchema = z.strictObject({
   /** effective-instructions.md and precedents.md text. */
   instructions: z.string().nullable(),
   precedents: z.string().nullable(),
+  /** Semantic precedents shown to agents for this attempt (precedents.json); absent for legacy lookups and older exports. */
+  precedent_keys: z.array(issueKeySchema).nullable().optional(),
+  precedent_kinds: z.array(z.string()).nullable().optional(),
   /** Final cumulative diff vs base (changes.patch). */
   final_diff: z.string().nullable(),
   /** Every provider invocation in start order, with prompt and transcript text unless excluded. */

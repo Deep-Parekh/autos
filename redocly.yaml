@@ -7,3 +7,5 @@ rules:
   operation-summary: error
   security-defined: error
   no-unresolved-refs: error
+  # components.schemas.AutosConfig documents config/config.yaml for reference; no endpoint uses it.
+  no-unused-components: off

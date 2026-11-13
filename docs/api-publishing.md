@@ -8,6 +8,8 @@ For Compose, start the controller with `node apps/cli/bin/autos.mjs --config /ap
 
 The OpenAPI 3.1 document in [openapi.yaml](openapi.yaml) is generated from Fastify route schemas. `autos docs validate` checks generated contract parity. `autos docs preview` serves a local Swagger reference and its bundled assets on loopback, with submission controls disabled and no external CDN. The API documents PLANNED dry-run results. `GET /v1/jobs` returns recent job history and `GET /v1/queue` returns the current queue; both support bounded limit and cursor pagination. Job creation is asynchronous: `POST /v1/jobs` validates and queues the request, responds with HTTP 202, then the controller executes it in the background. Cancellation and shutdown propagate abort signals to workflow execution.
 
+The document also publishes every setting of `config/config.yaml` as `components.schemas.AutosConfig` (shown under **Schemas** in `autos docs preview`): each key with its type, allowed values, ranges, patterns, defaults and a description. It is generated from the same Zod schema that validates the file at startup (`apps/controller/src/config-schema.ts`), so it cannot drift; a test requires a description for every setting. No endpoint accepts or returns the configuration, and cross-field rules (for example distinct storage directories, allowlisted lineage repositories) are enforced at load time but are not expressible in the schema.
+
 Artifact responses contain the schema-versioned manifest and safe metadata only. They do not serve raw source, prompts, transcripts, issue/customer bodies, or arbitrary filesystem paths. Provider diagnostics distinguish executable presence from authentication and read-only smoke-test status.
 
 ## Operator monitoring over SSH
@@ -79,6 +81,19 @@ A pin chooses a role's starting tier (a `model_tiers` name, with an optional eff
 ## Bulk retry of blocked jobs
 
 `POST /v1/jobs/retry-blocked` with an optional body `{ "code": "UPSTREAM" }` starts a new attempt (the same `workflow.retry` as `autos retry JOB_ID`) for every `BLOCKED` job, or only those blocked with that `blocked_code`. A job is skipped when its issue already has a newer attempt, so only the newest blocked attempt per issue is retried. The response is `{ matched, retried, skipped_newer_attempt, failed, jobs: [{ issue_key, job_id, new_job_id }] }`. New attempts are queued; at most `jobs.max_parallel` start immediately and the controller's drain loop runs the rest as slots free up. `autos retry --all-blocked [--code CODE]` offers the same operation locally.
+
+## Precedent index, lineage, search and Confluence drafts
+
+Present when `precedents` (and, for drafts, `confluence.drafts`) is configured; see [semantic-precedents-plan.md](semantic-precedents-plan.md) and the "Precedent index and Confluence drafts" section of [cli.md](cli.md). Same bearer token, loopback binding and error shape as every `/v1` route. Without a precedent index each index route answers `404 NOT_FOUND` with "Precedent index is not configured ..."; without drafts `POST /v1/confluence-drafts` answers `404 NOT_FOUND` with "Confluence drafts are not configured ...". Request and response bodies (search text, results, index records, draft links) are never logged.
+
+- `GET /v1/index/status` returns `{ index, auto_sync, loop, operation }`: index counts and sync times, whether `controller start` runs the background loop and its last tick, and the running or last manual operation with its sync reports.
+- `POST /v1/index/sync` (`{ full?, reconcile? }`) and `POST /v1/index/rebuild` start the operation in the background and return `202` with the operation; `409 CONFLICT` while another index operation (including a background tick) runs or when `precedents.enabled` is false.
+- `POST /v1/index/purge` (`{ project_key }`) deletes that project's indexed issues now and returns `{ project_key, issues_deleted }`.
+- `GET /v1/lineage` returns `{ nodes, unattached, missing }`.
+- `POST /v1/precedents/search` (exactly one of `issue_key` or `text`; optional `limit` 1..20, `include_unresolved`, `judge` (default true), `explain`) returns `{ result, related, explain }`; `409` when `precedents.enabled` is false. `GET /v1/precedents/{issueKey}` returns the index record or `404`.
+- `POST /v1/confluence-drafts` (exactly one of `job_id` or `issue_key`) creates or refreshes the unpublished fix-document draft of a `READY_FOR_HUMAN` attempt and returns `201` with `{ job_id, issue_key, draft: { page_id, space_id, version, status: draft, edit_url }, created_at, supersedes_page_id }`. The draft is visible only to the Atlassian account whose token the controller uses; a person publishes it in Confluence. Errors from the workflow keep the usual mapping (`404` unknown job/issue, `409` not `READY_FOR_HUMAN`, `403` refused by policy).
+
+Audit lines: `index_sync`, `index_rebuild` (`full`, `reconcile`), `index_purge` (`project_key`, `issues_deleted`), `confluence_draft` (`job_id`, `issue_key`, `page_id`, `supersedes_page_id`).
 
 ## Request logging and audit
 

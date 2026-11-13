@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { AutosError, missingToolchains, resolveToolchain, type AutosConfig, type InstalledToolchains } from '@autos/contracts';
 import type { ControllerServices } from '@autos/controller';
+import { precedentsDeepChecks } from './precedents-doctor.js';
 
 export interface CheckResult { name: string; status: 'PASS' | 'WARN' | 'FAIL'; message: string }
 
@@ -22,7 +23,7 @@ async function defaultFreeBytes(path: string): Promise<number> {
   return Number(info.bavail) * Number(info.bsize);
 }
 
-export type DeepRuntime = Pick<ControllerServices, 'runnerHealth' | 'projects' | 'diagnostics'>;
+export type DeepRuntime = Pick<ControllerServices, 'runnerHealth' | 'projects' | 'diagnostics'> & Partial<Pick<ControllerServices, 'precedentIndex'>>;
 
 /**
  * Read-only deep diagnostics for `autos doctor --deep`. Every check is isolated: one failing check never hides the
@@ -158,6 +159,8 @@ export async function deepChecks(input: { config: AutosConfig; env: NodeJS.Proce
       add(name, free < LOW_DISK_BYTES ? 'WARN' : 'PASS', `${gib(free)} free${free < LOW_DISK_BYTES ? ` (below ${gib(LOW_DISK_BYTES)}; free space before long runs)` : ''}`);
     } catch { add(name, 'WARN', 'directory not accessible; free space unknown'); }
   }
+  // Semantic precedents (only when configured): index status and lineage summary through the runtime's index.
+  if (config.precedents) results.push(...await precedentsDeepChecks(config, runtime?.precedentIndex, input.runtimeError));
   return results;
 }
 

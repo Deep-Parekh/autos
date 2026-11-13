@@ -1,4 +1,5 @@
 import type { AutosConfig, CheckCommand, Effort, RepositoryConfig } from './config.js';
+import type { ConfluenceDraftRecord, FixDocumentDraftPort, SemanticPrecedentPort } from './precedents.js';
 import type { AgentRole, IssueSnapshot, JobState, PrecedentResult, ProjectMapping, Provider, SavedFilter } from './domain.js';
 import type { AutosError, ErrorCode } from './errors.js';
 import type { ArtifactManifest, Checks } from './evidence.js';
@@ -200,8 +201,17 @@ export interface WorkflowDependencies {
   git: GitRunnerPort; runner: RunnerPort; jobs: JobStorePort; artifacts: ArtifactStorePort; clock: ClockPort;
   /** Optional read-only Jira/Confluence tool sessions for role runs (the knowledge gateway). */
   knowledge?: KnowledgeSessionPort;
+  /** Semantic precedent search (used only when config.precedents.source is 'semantic'). */
+  semanticPrecedents?: SemanticPrecedentPort;
+  /** Confluence fix-document drafts (used only when config.confluence.drafts.enabled). */
+  fixDocuments?: FixDocumentDraftPort;
 }
 export interface WorkflowServicePort {
+  /**
+   * Create (or refresh while still an untouched draft) the Confluence fix-document draft for a READY_FOR_HUMAN attempt
+   * (job id or issue key = latest ready attempt). FORBIDDEN when drafts are not configured.
+   */
+  createFixDocumentDraft?(jobIdOrIssueKey: string, signal?: AbortSignal): Promise<ConfluenceDraftRecord>;
   /** Optional operator notes apply to this attempt's roles (see operatorNoteRequestSchema). */
   submit(issueKey: string, dryRun: boolean, notes?: OperatorNoteRequest[]): Promise<JobRecord>;
   /**

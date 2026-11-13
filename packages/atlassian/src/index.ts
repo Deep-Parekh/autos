@@ -2,15 +2,17 @@ import { parseFragment } from 'parse5';
 import { z } from 'zod';
 import { createKnowledgeReads } from './knowledge.js';
 import {
+  buildIndexJql, indexCommentPageSchema, INDEX_ISSUE_FIELDS, normalizeIdRow, normalizeIndexedComment, normalizeIndexedIssue, parseSearchPage, validateNextPageToken,
+} from './index-sync.js';
+import { defaultSleep, requestJson, safeError, siteUrl, type FetchLike, type Sleep } from './http.js';
+import {
   AutosError, parseJdkCell, parseTomcatCell, issueSnapshotSchema, configSectionSchemas, projectMappingSchema, precedentResultSchema, savedFilterSchema,
-  type AtlassianReadPort, type AutosConfig, type KnowledgeReadPort, type IssueSnapshot, type PrecedentReadPort,
+  type AtlassianReadPort, type AutosConfig, type IndexedComment, type IndexedIssue, type KnowledgeReadPort, type IssueSnapshot, type PrecedentReadPort,
   type PrecedentResult, type ProjectMapping, type SavedFilter,
 } from '@autos/contracts';
 
 type JiraCredentials = { username: string; token: string };
 type Credentials = { jira: JiraCredentials; confluence: JiraCredentials; bitbucketToken?: string };
-type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-type Sleep = (ms: number, signal?: AbortSignal) => Promise<void>;
 export interface AtlassianOptions {
   config: AutosConfig;
   credentials: Credentials;
@@ -40,10 +42,6 @@ const readTimeout = 20_000;
 const maxRetriesDefault = 3;
 const pageSize = 100;
 const maxPages = 10_000;
-
-function safeError(code: ConstructorParameters<typeof AutosError>[0], message: string, retryable = false): AutosError {
-  return new AutosError(code, message, { retryable });
-}
 
 function escapeJql(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n\u0000-\u001f]/g, ' ');
@@ -214,16 +212,6 @@ function parseBranchMap(html: string, pageId: string, version: number, fetchedAt
     mappings.push(list[0]!);
   }
   return { mappings, ignored_rows: ignored, invalid_projects: [...problems].map(([project_key, reason]) => ({ project_key, reason })), page_version: version };
-}
-
-function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) return reject(safeError('CANCELLED', 'Atlassian request cancelled'));
-    const timer = setTimeout(done, ms);
-    function done() { signal?.removeEventListener('abort', cancel); resolve(); }
-    function cancel() { clearTimeout(timer); reject(safeError('CANCELLED', 'Atlassian request cancelled')); }
-    signal?.addEventListener('abort', cancel, { once: true });
-  });
 }
 
 export class AtlassianClient implements AtlassianReadPort, KnowledgeReadPort {
@@ -457,10 +445,7 @@ export class AtlassianClient implements AtlassianReadPort, KnowledgeReadPort {
   }
 
   private url(site: string, path: string, query?: Record<string, string>): URL {
-    const url = new URL(path, site);
-    if (url.origin !== new URL(site).origin) throw safeError('INTERNAL', 'Refused an unsafe Atlassian URL');
-    for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
-    return url;
+    return siteUrl(site, path, query);
   }
 
   getIssueDetail: KnowledgeReadPort['getIssueDetail'] = (key, signal) => this.knowledge.getIssueDetail(key, signal);
@@ -526,50 +511,67 @@ export class AtlassianClient implements AtlassianReadPort, KnowledgeReadPort {
 
   private async getJson(site: string, path: string, auth: string, query: Record<string, string> = {}, signal?: AbortSignal): Promise<unknown> {
     const url = this.url(site, path, query);
-    for (let attempt = 0; ; attempt += 1) {
-      if (signal?.aborted) throw safeError('CANCELLED', 'Atlassian request cancelled');
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-      const abortParent = () => controller.abort();
-      signal?.addEventListener('abort', abortParent, { once: true });
-      try {
-        const response = await this.fetcher(url, { method: 'GET', headers: { Accept: 'application/json', Authorization: auth }, redirect: 'manual', signal: controller.signal });
-        if (controller.signal.aborted) throw safeError('TIMEOUT', 'Atlassian request timed out', true);
-        if (response.status >= 300 && response.status < 400) throw safeError('FORBIDDEN', 'Atlassian redirected a read request; redirect refused');
-        if ((response.status === 429 || response.status >= 500) && attempt < this.retries) {
-          const retryAfter = response.headers.get('retry-after');
-          const parsedSeconds = retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter) ? Number(retryAfter) : NaN;
-          const delay = Number.isFinite(parsedSeconds) ? Math.min(30_000, Math.max(0, parsedSeconds * 1000)) : Math.min(5_000, 200 * 2 ** attempt);
-          await response.body?.cancel().catch(() => undefined);
-          await this.sleep(delay, signal);
-          continue;
-        }
-        // Atlassian "scoped" API tokens only work through the api.atlassian.com gateway, which this
-        // client does not support (it calls the site URL directly), so they surface here as 401.
-        if (response.status === 401) throw safeError('AUTH', 'Atlassian authentication failed; use a classic (unscoped) API token for this site');
-        if (response.status === 403) throw safeError('FORBIDDEN', 'Atlassian denied access to the requested resource');
-        if (response.status === 404) throw safeError('NOT_FOUND', 'Atlassian resource was not found');
-        if (response.status === 429) throw safeError('RATE_LIMIT', 'Atlassian rate limit persisted after retries', true);
-        if (!response.ok) throw safeError('UPSTREAM', 'Atlassian read request failed', response.status >= 500);
-        let json: unknown;
-        try { json = await response.json(); } catch {
-          if (signal?.aborted) throw safeError('CANCELLED', 'Atlassian request cancelled');
-          if (controller.signal.aborted) throw safeError('TIMEOUT', 'Atlassian request timed out', true);
-          throw safeError('UPSTREAM', 'Atlassian returned invalid JSON');
-        }
-        if (signal?.aborted) throw safeError('CANCELLED', 'Atlassian request cancelled');
-        if (controller.signal.aborted) throw safeError('TIMEOUT', 'Atlassian request timed out', true);
-        return json;
-      } catch (error) {
-        if (error instanceof AutosError) throw error;
-        if (signal?.aborted) throw safeError('CANCELLED', 'Atlassian request cancelled');
-        if (controller.signal.aborted) throw safeError('TIMEOUT', 'Atlassian request timed out', true);
-        throw safeError('UPSTREAM', 'Atlassian could not be reached', true);
-      } finally {
-        clearTimeout(timeout);
-        signal?.removeEventListener('abort', abortParent);
-      }
+    return (await requestJson({ fetcher: this.fetcher, sleep: this.sleep, timeoutMs: this.timeoutMs, retries: this.retries, url, auth, signal })).json;
+  }
+
+  /**
+   * One page of issues for the precedent index (read-only). JQL is built from validated project keys and dates only.
+   * Security-level issues and visibility-restricted comments are never returned; malformed rows are skipped and counted.
+   */
+  async searchIssuesForIndex(input: { projects: string[]; updatedSince?: Date; windowWeeks: number; nextPageToken?: string }, signal?: AbortSignal): Promise<{
+    issues: IndexedIssue[]; nextPageToken?: string; skipped_restricted: number; skipped_invalid: number;
+  }> {
+    const jql = buildIndexJql(input);
+    validateNextPageToken(input.nextPageToken);
+    const query: Record<string, string> = { jql, maxResults: String(pageSize), fields: INDEX_ISSUE_FIELDS.join(',') };
+    if (input.nextPageToken) query.nextPageToken = input.nextPageToken;
+    const raw = await this.getJson(this.config.jira.site_url, '/rest/api/3/search/jql', this.jiraAuth, query, signal);
+    const page = parseSearchPage(raw, input.nextPageToken);
+    const projects = new Set(input.projects);
+    const issues: IndexedIssue[] = [];
+    let restricted = 0; let invalid = 0;
+    for (const row of page.issues) {
+      const result = normalizeIndexedIssue(row, projects, plainText);
+      if (result.kind === 'issue') issues.push(result.issue);
+      else if (result.kind === 'restricted') restricted += 1;
+      else invalid += 1;
     }
+    return { issues, ...(page.nextPageToken ? { nextPageToken: page.nextPageToken } : {}), skipped_restricted: restricted, skipped_invalid: invalid };
+  }
+
+  /**
+   * One page of comments for an indexed issue, used only when the search page reported comments_truncated.
+   * Named differently from KnowledgeReadPort.getIssueComments (agent tool, by key) on purpose.
+   */
+  async getIndexComments(issueId: string, startAt: number, signal?: AbortSignal): Promise<{ comments: IndexedComment[]; next_start_at: number | null; skipped_invalid: number }> {
+    if (typeof issueId !== 'string' || !/^[0-9]{1,20}$/.test(issueId)) throw safeError('INVALID_INPUT', 'Issue id is invalid');
+    if (!Number.isInteger(startAt) || startAt < 0 || startAt > 1_000_000) throw safeError('INVALID_INPUT', 'Comment offset is invalid');
+    const raw = await this.getJson(this.config.jira.site_url, `/rest/api/3/issue/${encodeURIComponent(issueId)}/comment`, this.jiraAuth,
+      { startAt: String(startAt), maxResults: String(pageSize), orderBy: 'created' }, signal);
+    const page = indexCommentPageSchema.safeParse(raw);
+    if (!page.success) throw safeError('UPSTREAM', 'Atlassian returned an invalid comments page');
+    const comments: IndexedComment[] = [];
+    let invalid = 0;
+    for (const entry of page.data.comments) {
+      try {
+        const comment = normalizeIndexedComment(entry, plainText);
+        if (comment) comments.push(comment);
+      } catch { invalid += 1; }
+    }
+    const next = startAt + page.data.comments.length;
+    const more = page.data.comments.length > 0 && (page.data.total === undefined ? page.data.comments.length >= pageSize : next < page.data.total);
+    return { comments, next_start_at: more ? next : null, skipped_invalid: invalid };
+  }
+
+  /** One page of `{id, key, updated}` for reconciliation. Any malformed row fails the page (a skipped id would look deleted). */
+  async listIssueIds(input: { projects: string[]; windowWeeks: number; nextPageToken?: string }, signal?: AbortSignal): Promise<{ ids: { id: string; key: string; updated: string }[]; nextPageToken?: string }> {
+    const jql = buildIndexJql({ projects: input.projects, windowWeeks: input.windowWeeks });
+    validateNextPageToken(input.nextPageToken);
+    const query: Record<string, string> = { jql, maxResults: String(pageSize), fields: 'id,key,updated' };
+    if (input.nextPageToken) query.nextPageToken = input.nextPageToken;
+    const raw = await this.getJson(this.config.jira.site_url, '/rest/api/3/search/jql', this.jiraAuth, query, signal);
+    const page = parseSearchPage(raw, input.nextPageToken);
+    return { ids: page.issues.map(normalizeIdRow), ...(page.nextPageToken ? { nextPageToken: page.nextPageToken } : {}) };
   }
 
   async getSavedFilter(filterId: string, signal?: AbortSignal): Promise<SavedFilter> {
@@ -682,6 +684,8 @@ export class AtlassianClient implements AtlassianReadPort, KnowledgeReadPort {
     return matches[0]!;
   }
 }
+
+export { ConfluenceDraftWriter, renderFixDocumentStorage, fixDocumentTitle, type ConfluenceDraftWriterOptions, type FixDocumentInput } from './drafts.js';
 
 export function createAtlassianClient(options: AtlassianOptions): AtlassianClient {
   return new AtlassianClient(options);

@@ -1,10 +1,14 @@
 import Fastify, { LogController, type FastifyInstance, type FastifyReply, type FastifyRequest, type FastifyServerOptions } from 'fastify';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
+import { configJsonSchema } from './config-schema.js';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { ActiveJob, AutosConfig, ArtifactManifest, Effort, OperatorNoteRequest, RepositoryConfig, ArtifactStorePort, JobEvent, JobRecord, ProjectMapping, Provider, RunnerHealth, TicketNotesSummary, WorkflowActivity } from '@autos/contracts';
 import { artifactManifestSchema, AutosError, closeIssueRequestSchema, EFFORT_LEVELS, ERROR_CODES, ISSUE_RESOLUTIONS, issueKeySchema, JOB_EVENT_TYPES, JOB_STATES, MAX_TICKET_NOTES, PROVIDERS, TICKET_WORK_STATUSES, pruneWorkspacesRequestSchema, ROLES, operatorNoteRequestSchema, operatorNoteSchema, projectMappingSchema, tierPinRequestSchema, WORKFLOW_STAGES, WORKSPACE_DIR_NAME_PATTERN, WORKSPACE_REMOVAL_REASONS, WORKSPACE_RETENTION_REASONS } from '@autos/contracts';
-import type { WorkflowServicePort } from '@autos/contracts';
+import type { PrecedentIndexPort, WorkflowServicePort } from '@autos/contracts';
+import { IndexCoordinator, registerPrecedentRoutes, type IndexLoopOptions } from './precedents.js';
+
+export { IndexCoordinator, type IndexLoopOptions, type IndexLoopState, type IndexOperation } from './precedents.js';
 
 export interface ProviderDiagnostic {
   provider: Provider;
@@ -114,6 +118,8 @@ export interface ControllerServices {
   runnerHealth?(): Promise<RunnerHealthResult>;
   /** Read-only checks for `autos doctor --deep`; optional so fakes and older runtimes keep working. */
   diagnostics?: DeepDiagnostics;
+  /** Semantic precedent index (docs/semantic-precedents-plan.md); absent when precedents are not configured. */
+  precedentIndex?: PrecedentIndexPort;
   artifacts: ArtifactStorePort;
   config: AutosConfig;
   providers(): Promise<ProviderDiagnostic[]>;
@@ -138,6 +144,11 @@ export interface ControllerOptions extends ControllerServices {
   logStream?: { write(line: string): void };
   /** Timeout for the runner health probe in `/v1/status`; defaults to 2 seconds. */
   runnerHealthTimeoutMs?: number;
+  /**
+   * Background precedent index loop (`controller start` only): runs when set, a precedentIndex is present and
+   * config.precedents is enabled with index.auto_sync. Stopped when the server closes.
+   */
+  indexLoop?: IndexLoopOptions;
 }
 
 const errorSchema = {
@@ -576,7 +587,9 @@ export async function createController(options: ControllerOptions): Promise<Fast
   }
 
   await app.register(swagger, {
-    openapi: { openapi: '3.1.0', info: { title: 'Autos Controller API', version: '0.1.0' }, servers: [{ url: 'http://127.0.0.1:8787', description: 'Local controller' }], components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } } } },
+    openapi: { openapi: '3.1.0', info: { title: 'Autos Controller API', version: '0.1.0' }, servers: [{ url: 'http://127.0.0.1:8787', description: 'Local controller' }], components: { securitySchemes: { bearerAuth: { type: 'http', scheme: 'bearer' } },
+      // Reference only: every setting of config/config.yaml with its allowed values, ranges, defaults and meaning. No endpoint accepts or returns it.
+      schemas: { AutosConfig: configJsonSchema() } } },
     transform: ({ schema, url }) => {
       if (!url.startsWith('/v1')) return { url, schema };
       const responses = schema.response && typeof schema.response === 'object' ? schema.response as Record<string, unknown> : {};
@@ -617,10 +630,17 @@ export async function createController(options: ControllerOptions): Promise<Fast
     reply.code(status).send({ code, message, request_id: request.id });
   });
   app.setNotFoundHandler((request, reply) => reply.code(404).send({ code: 'NOT_FOUND', message: 'Resource not found', request_id: request.id }));
+  // Index operations (background tick, manual sync/rebuild) are serialized here; absent without a precedent index.
+  const indexCoordinator = options.precedentIndex ? new IndexCoordinator(options.precedentIndex, () => app.log) : undefined;
+  if (indexCoordinator && options.indexLoop && options.config.precedents?.enabled && options.config.precedents.index.auto_sync) {
+    const loopOptions = options.indexLoop;
+    app.addHook('onReady', async () => { indexCoordinator.startLoop(loopOptions); });
+  }
   app.addHook('onClose', async () => {
     closing = true; if (retryTimer) clearTimeout(retryTimer);
     for (const abort of running.values()) abort.abort();
     await Promise.allSettled([...background]);
+    await indexCoordinator?.stop();
     await options.close();
   });
 
@@ -902,6 +922,8 @@ export async function createController(options: ControllerOptions): Promise<Fast
     if (!await options.workflow.get(jobId)) return reply.code(404).send({ code: 'NOT_FOUND', message: 'Job not found', request_id: request.id });
     return listEvents(request.query as { after?: number; limit?: number }, jobId);
   });
+
+  registerPrecedentRoutes(app, { config: options.config, index: options.precedentIndex, coordinator: indexCoordinator, workflow: options.workflow, errorSchema, actorHeaders, audit });
 
   const streams = new Set<() => void>();
   app.addHook('preClose', async () => { for (const end of [...streams]) end(); });

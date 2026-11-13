@@ -7,7 +7,1284 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
-  schemas: {}
+  schemas:
+    AutosConfig:
+      type: object
+      properties:
+        schema_version:
+          type: number
+          description: Configuration format version. Must be 1.
+          enum:
+            - 1
+        jira:
+          type: object
+          properties:
+            site_url:
+              type: string
+              format: uri
+              description: Jira Cloud site root, https with no path (for example https://example.atlassian.net).
+            saved_filter_id:
+              anyOf:
+                - type: string
+                  pattern: ^[0-9]+$
+                  description: Numeric ID of the private saved filter whose tickets Autos works on.
+                - type: integer
+                  exclusiveMinimum: 0
+                  maximum: 9007199254740991
+                  description: Numeric ID of the private saved filter whose tickets Autos works on.
+              description: Numeric ID of the private saved filter whose tickets Autos works on.
+            allowed_projects:
+              minItems: 1
+              type: array
+              items:
+                type: string
+                pattern: ^[A-Z][A-Z0-9]*$
+              description: Jira project keys Autos may work on; tickets in other projects are ignored or refused.
+            intake_types:
+              minItems: 1
+              type: array
+              items:
+                type: string
+                minLength: 1
+              description: "Optional extra restriction on issue type names. Absent: every issue the saved filter returns is eligible."
+            acceptance_criteria_fields:
+              default: []
+              type: array
+              items:
+                type: string
+                pattern: ^customfield_[0-9]+$
+              description: Custom fields (customfield_NNNNN) read as acceptance criteria and given to every role.
+            read_only:
+              type: boolean
+              description: Must be true. Autos never writes to Jira.
+              enum:
+                - true
+            poll_seconds:
+              default: 300
+              type: integer
+              minimum: 10
+              maximum: 9007199254740991
+              description: Seconds between filter polls (and the drain loop's maximum idle time). Minimum 10.
+            auto_poll:
+              default: true
+              type: boolean
+              description: When false, `controller start` serves the API and runs submitted jobs but never reads the filter on its own. Keep false for first tests.
+            max_new_per_poll:
+              default: 10
+              type: integer
+              minimum: 1
+              maximum: 100
+              description: Upper bound on new jobs one poll may queue, so a backlog is admitted gradually.
+            username_env:
+              type: string
+              pattern: ^[A-Z][A-Z0-9_]*$
+              description: Environment variable holding the Jira account e-mail.
+            token_env:
+              type: string
+              pattern: ^[A-Z][A-Z0-9_]*$
+              description: Environment variable holding the Jira API token (classic, unscoped).
+          required:
+            - site_url
+            - saved_filter_id
+            - allowed_projects
+            - read_only
+            - username_env
+            - token_env
+          additionalProperties: false
+          description: "Jira Cloud intake. Autos only reads Jira (enforced by `read_only: true`)."
+        confluence:
+          type: object
+          properties:
+            site_url:
+              type: string
+              format: uri
+              description: Confluence Cloud site root, https with no path.
+            branch_map_page_id:
+              type: string
+              pattern: ^[0-9]+$
+              description: Numeric page ID of the branch map (project → workspace, repository, development branch, sandbox branch, optional JDK/Tomcat).
+            read_only:
+              type: boolean
+              description: Must be true. Autos reads Confluence; the only write is the optional draft feature below.
+              enum:
+                - true
+            username_env:
+              type: string
+              pattern: ^[A-Z][A-Z0-9_]*$
+              description: Environment variable holding the Confluence account e-mail.
+            token_env:
+              type: string
+              pattern: ^[A-Z][A-Z0-9_]*$
+              description: Environment variable holding the Confluence API token. Drafts are created as this account and are visible only to it.
+            drafts:
+              type: object
+              properties:
+                enabled:
+                  default: false
+                  type: boolean
+                  description: Turn the draft feature on (`autos confluence draft`, POST /v1/confluence-drafts).
+                space_key:
+                  type: string
+                  pattern: ^[A-Za-z0-9~][A-Za-z0-9_~-]{0,99}$
+                  description: Space key the drafts are created in.
+                parent_page_id:
+                  type: string
+                  pattern: ^[0-9]+$
+                  description: Numeric ID of the parent page the drafts are created under.
+                auto:
+                  default: false
+                  type: boolean
+                  description: Create the draft automatically when an attempt reaches READY_FOR_HUMAN; false = only on request.
+              required:
+                - space_key
+                - parent_page_id
+              additionalProperties: false
+              description: Optional fix-document drafts (docs/semantic-precedents-plan.md §12). Autos creates unpublished drafts only; a person reviews and publishes them in Confluence. Autos never publishes, deletes or edits a published page.
+          required:
+            - site_url
+            - branch_map_page_id
+            - read_only
+            - username_env
+            - token_env
+          additionalProperties: false
+          description: "Confluence Cloud: the branch-map page that routes projects to repositories, and optional fix-document drafts."
+        bitbucket:
+          type: object
+          properties:
+            allowed_repositories:
+              minItems: 1
+              type: array
+              items:
+                type: object
+                properties:
+                  workspace:
+                    type: string
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                    description: Bitbucket workspace ID.
+                  repository_slug:
+                    type: string
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                    description: Repository slug.
+                  remote_url:
+                    type: string
+                    minLength: 1
+                    description: Clone URL; must be exactly https://bitbucket.org/<workspace>/<slug>.git or git@bitbucket.org:<workspace>/<slug>.git.
+                  protected_branches:
+                    minItems: 1
+                    type: array
+                    items:
+                      type: string
+                      minLength: 1
+                      maxLength: 200
+                    description: Branches Autos must never use as its feature branch (for example main, develop).
+                  build_profile:
+                    type: string
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                    description: Name of the `build_profiles` entry whose checks, JDK and Tomcat this repository uses.
+                  allowed_paths:
+                    minItems: 1
+                    type: array
+                    items:
+                      type: string
+                      minLength: 1
+                    description: Path globs (repository-relative) the SWE may change. A candidate touching anything else is refused.
+                  prohibited_paths:
+                    default: []
+                    type: array
+                    items:
+                      type: string
+                      minLength: 1
+                    description: Path globs the SWE may never change, even inside allowed_paths.
+                required:
+                  - workspace
+                  - repository_slug
+                  - remote_url
+                  - protected_branches
+                  - build_profile
+                  - allowed_paths
+                additionalProperties: false
+              description: Repositories Autos may clone and commit to. A branch-map row pointing elsewhere is refused.
+            push_feature_branch:
+              default: false
+              type: boolean
+              description: "Push READY_FOR_HUMAN commits to `deep/<KEY>`: create-only the first time, fast-forward afterwards, never forced. Off by default."
+            push_blocked_attempts:
+              default: false
+              type: boolean
+              description: Commit and push the unreviewed work of a BLOCKED attempt (after its agents ran) to the feature branch, clearly labelled, so humans can inspect it; a retry continues from it.
+            create_pull_request:
+              type: boolean
+              description: Must be false. Autos never opens pull requests.
+              enum:
+                - false
+            read_token_env:
+              type: string
+              pattern: ^[A-Z][A-Z0-9_]*$
+              description: Optional environment variable with a Bitbucket read token, used only by the legacy similar-ticket lookup.
+          required:
+            - allowed_repositories
+            - create_pull_request
+          additionalProperties: false
+          description: Bitbucket Cloud repositories Autos may work in, and push behaviour.
+        git:
+          type: object
+          properties:
+            branch_template:
+              type: string
+              description: Feature branch name. Must be `deep/{issueKey}`.
+              enum:
+                - deep/{issueKey}
+            no_rebase:
+              type: boolean
+              description: Must be true. Autos never rebases.
+              enum:
+                - true
+            no_force_push:
+              type: boolean
+              description: Must be true. Autos never force-pushes.
+              enum:
+                - true
+            refuse_existing_feature_branch:
+              type: boolean
+              description: Must be true. An existing remote feature branch for a new attempt is refused, never overwritten.
+              enum:
+                - true
+          required:
+            - branch_template
+            - no_rebase
+            - no_force_push
+            - refuse_existing_feature_branch
+          additionalProperties: false
+          description: Fixed Git safety rules (all literal values).
+        providers:
+          type: object
+          properties:
+            claude:
+              type: object
+              properties:
+                binary:
+                  type: string
+                  minLength: 1
+                  description: Executable name or path of the CLI (inside the worker image in server mode).
+                auth_profile:
+                  type: string
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                  description: Name of the supervisor auth profile holding this provider's login (subscription token, auth directory or API key).
+              required:
+                - binary
+                - auth_profile
+              additionalProperties: false
+              description: One provider CLI (claude = Claude Code, codex = OpenAI Codex, cursor = Cursor agent).
+            codex:
+              type: object
+              properties:
+                binary:
+                  type: string
+                  minLength: 1
+                  description: Executable name or path of the CLI (inside the worker image in server mode).
+                auth_profile:
+                  type: string
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                  description: Name of the supervisor auth profile holding this provider's login (subscription token, auth directory or API key).
+              required:
+                - binary
+                - auth_profile
+              additionalProperties: false
+              description: One provider CLI (claude = Claude Code, codex = OpenAI Codex, cursor = Cursor agent).
+            cursor:
+              type: object
+              properties:
+                binary:
+                  type: string
+                  minLength: 1
+                  description: Executable name or path of the CLI (inside the worker image in server mode).
+                auth_profile:
+                  type: string
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                  description: Name of the supervisor auth profile holding this provider's login (subscription token, auth directory or API key).
+              required:
+                - binary
+                - auth_profile
+              additionalProperties: false
+              description: One provider CLI (claude = Claude Code, codex = OpenAI Codex, cursor = Cursor agent).
+          required:
+            - claude
+            - codex
+            - cursor
+          additionalProperties: false
+          description: Coding CLIs available to the roles.
+        models:
+          default: {}
+          type: object
+          propertyNames:
+            type: string
+            pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+          additionalProperties:
+            type: object
+            properties:
+              provider:
+                type: string
+                enum:
+                  - claude
+                  - codex
+                  - cursor
+                description: "Provider of the model: claude, codex or cursor."
+              model:
+                type: string
+                minLength: 1
+                maxLength: 200
+                pattern: ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$
+                description: "Model passed to the CLI. Cursor accepts only `auto`. Omitted: the CLI default."
+            required:
+              - provider
+            additionalProperties: false
+            description: A named model.
+          description: Optional reusable named models, referenced from tier entries as `name` or `name:effort`.
+        model_tiers:
+          default: {}
+          type: object
+          propertyNames:
+            type: string
+            pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+          additionalProperties:
+            minItems: 1
+            maxItems: 3
+            type: array
+            items:
+              anyOf:
+                - type: string
+                  maxLength: 60
+                  pattern: ^[a-z0-9][a-z0-9_-]{0,39}(?::[a-z]+)?$
+                - type: object
+                  properties:
+                    provider:
+                      type: string
+                      enum:
+                        - claude
+                        - codex
+                        - cursor
+                      description: "Provider of the entry: claude, codex or cursor."
+                    model:
+                      type: string
+                      minLength: 1
+                      maxLength: 200
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$
+                      description: Model passed to the CLI. Cursor accepts only `auto`.
+                    effort:
+                      type: string
+                      enum:
+                        - none
+                        - minimal
+                        - low
+                        - medium
+                        - high
+                        - xhigh
+                        - max
+                      description: "Reasoning effort for this entry. Claude: low|medium|high|xhigh|max. Codex: none|minimal|low|medium|high|xhigh|max. Cursor: none allowed."
+                  required:
+                    - provider
+                  additionalProperties: false
+            description: "One tier: an ordered list of entries, each a `models` reference (`name` or `name:effort`) or an inline {provider, model, effort}."
+          description: Named model tiers (size classes such as sm, med, lg). Each tier is an ordered list of 1 to 3 entries tried in order on provider-side failures; roles with a ladder escalate between tiers.
+        triage:
+          type: object
+          properties:
+            enabled:
+              default: true
+              type: boolean
+              description: "Run triage for new tickets. False or absent: roles start at their lowest tier (or floor)."
+            tier:
+              type: string
+              pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+              description: Tier (from model_tiers) the triage call runs on.
+            timeout_ms:
+              default: 180000
+              type: integer
+              exclusiveMinimum: 0
+              maximum: 3600000
+              description: Timeout of the triage call in milliseconds.
+          required:
+            - tier
+          additionalProperties: false
+          description: Optional cheap read-only call that picks each ladder role's starting tier for a new ticket (clamped to the ladder and floor by trusted code).
+        agents:
+          type: object
+          properties:
+            swe:
+              type: object
+              properties:
+                provider:
+                  type: string
+                  enum:
+                    - claude
+                    - codex
+                    - cursor
+                  description: "Primary provider (chain form): claude, codex or cursor."
+                model:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$
+                  description: Model for the primary provider (chain form). Cursor accepts only `auto`.
+                timeout_ms:
+                  default: 600000
+                  type: integer
+                  exclusiveMinimum: 0
+                  maximum: 3600000
+                  description: Timeout of one role invocation in milliseconds.
+                fallbacks:
+                  maxItems: 2
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                        enum:
+                          - claude
+                          - codex
+                          - cursor
+                        description: Fallback provider.
+                      model:
+                        type: string
+                        minLength: 1
+                        maxLength: 200
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$
+                        description: Model for the fallback provider.
+                    required:
+                      - provider
+                    additionalProperties: false
+                  description: Up to two fallback providers (chain form), used only after provider-side failures (AUTH, RATE_LIMIT, UPSTREAM, UNAVAILABLE, TIMEOUT, INVALID_OUTPUT, CONTEXT). A chain never repeats a provider.
+                ladder:
+                  minItems: 1
+                  maxItems: 8
+                  type: array
+                  items:
+                    type: string
+                    pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                  description: "Ladder form: tier names from model_tiers, cheapest first. The role starts low and escalates when its work fails."
+                min:
+                  type: string
+                  pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                  description: "Ladder form: floor tier (one of the ladder's tiers). Triage, pins and revisions never start the role below it."
+              additionalProperties: false
+              description: "One role: swe writes the fix (source read-write); qa judges it against acceptance criteria and checks; reviewer looks for defects (both source read-only)."
+            qa:
+              type: object
+              properties:
+                provider:
+                  type: string
+                  enum:
+                    - claude
+                    - codex
+                    - cursor
+                  description: "Primary provider (chain form): claude, codex or cursor."
+                model:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$
+                  description: Model for the primary provider (chain form). Cursor accepts only `auto`.
+                timeout_ms:
+                  default: 600000
+                  type: integer
+                  exclusiveMinimum: 0
+                  maximum: 3600000
+                  description: Timeout of one role invocation in milliseconds.
+                fallbacks:
+                  maxItems: 2
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                        enum:
+                          - claude
+                          - codex
+                          - cursor
+                        description: Fallback provider.
+                      model:
+                        type: string
+                        minLength: 1
+                        maxLength: 200
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$
+                        description: Model for the fallback provider.
+                    required:
+                      - provider
+                    additionalProperties: false
+                  description: Up to two fallback providers (chain form), used only after provider-side failures (AUTH, RATE_LIMIT, UPSTREAM, UNAVAILABLE, TIMEOUT, INVALID_OUTPUT, CONTEXT). A chain never repeats a provider.
+                ladder:
+                  minItems: 1
+                  maxItems: 8
+                  type: array
+                  items:
+                    type: string
+                    pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                  description: "Ladder form: tier names from model_tiers, cheapest first. The role starts low and escalates when its work fails."
+                min:
+                  type: string
+                  pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                  description: "Ladder form: floor tier (one of the ladder's tiers). Triage, pins and revisions never start the role below it."
+              additionalProperties: false
+              description: "One role: swe writes the fix (source read-write); qa judges it against acceptance criteria and checks; reviewer looks for defects (both source read-only)."
+            reviewer:
+              type: object
+              properties:
+                provider:
+                  type: string
+                  enum:
+                    - claude
+                    - codex
+                    - cursor
+                  description: "Primary provider (chain form): claude, codex or cursor."
+                model:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+                  pattern: ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$
+                  description: Model for the primary provider (chain form). Cursor accepts only `auto`.
+                timeout_ms:
+                  default: 600000
+                  type: integer
+                  exclusiveMinimum: 0
+                  maximum: 3600000
+                  description: Timeout of one role invocation in milliseconds.
+                fallbacks:
+                  maxItems: 2
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      provider:
+                        type: string
+                        enum:
+                          - claude
+                          - codex
+                          - cursor
+                        description: Fallback provider.
+                      model:
+                        type: string
+                        minLength: 1
+                        maxLength: 200
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9_.:/-]*$
+                        description: Model for the fallback provider.
+                    required:
+                      - provider
+                    additionalProperties: false
+                  description: Up to two fallback providers (chain form), used only after provider-side failures (AUTH, RATE_LIMIT, UPSTREAM, UNAVAILABLE, TIMEOUT, INVALID_OUTPUT, CONTEXT). A chain never repeats a provider.
+                ladder:
+                  minItems: 1
+                  maxItems: 8
+                  type: array
+                  items:
+                    type: string
+                    pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                  description: "Ladder form: tier names from model_tiers, cheapest first. The role starts low and escalates when its work fails."
+                min:
+                  type: string
+                  pattern: ^[a-z0-9][a-z0-9_-]{0,39}$
+                  description: "Ladder form: floor tier (one of the ladder's tiers). Triage, pins and revisions never start the role below it."
+              additionalProperties: false
+              description: "One role: swe writes the fix (source read-write); qa judges it against acceptance criteria and checks; reviewer looks for defects (both source read-only)."
+          required:
+            - swe
+            - qa
+            - reviewer
+          additionalProperties: false
+          description: The three roles. Each uses either a provider chain (provider, model, fallbacks) or a ladder of tiers (ladder, min), not both.
+        jobs:
+          type: object
+          properties:
+            max_parallel:
+              default: 1
+              type: integer
+              minimum: 1
+              maximum: 8
+              description: Concurrent ticket jobs (slots). Keep 1 for the pilot. Never more than one active job per issue.
+            max_concurrent_checks:
+              type: integer
+              minimum: 1
+              maximum: 8
+              description: "Concurrent check runs across all jobs. Must not exceed max_parallel. Absent: 1."
+            max_repair_rounds:
+              type: integer
+              minimum: 0
+              maximum: 2
+              description: Repair rounds after failed checks, QA or review (0 to 2). Tier escalations do not count.
+            workspace_retention_hours:
+              default: 72
+              type: integer
+              minimum: 1
+              maximum: 2160
+              description: Hours a BLOCKED/CANCELLED, superseded or orphan workspace is kept before pruning. The latest READY_FOR_HUMAN workspace of an open issue is never pruned.
+            auto_prune_workspaces:
+              default: true
+              type: boolean
+              description: Apply the retention policy automatically (at most hourly, between jobs).
+            similar_tickets:
+              type: object
+              properties:
+                enabled:
+                  type: boolean
+                  description: Run the legacy lookup.
+                max_candidates:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                  description: Maximum precedents the legacy lookup returns (1 to 5).
+              required:
+                - enabled
+                - max_candidates
+              additionalProperties: false
+              description: Legacy similar-ticket lookup (linked issues, same component, summary keywords, commit scan). Used when `precedents` is absent or its source is legacy.
+            rate_limit_pause:
+              default:
+                initial_minutes: 15
+                max_minutes: 240
+                max_total_hours: 24
+              type: object
+              properties:
+                initial_minutes:
+                  default: 15
+                  type: integer
+                  minimum: 1
+                  maximum: 1440
+                  description: First backoff when providers report no reset time.
+                max_minutes:
+                  default: 240
+                  type: integer
+                  minimum: 1
+                  maximum: 1440
+                  description: Maximum backoff between resumes.
+                max_total_hours:
+                  default: 24
+                  type: integer
+                  minimum: 1
+                  maximum: 168
+                  description: A pause streak longer than this blocks the attempt with RATE_LIMIT.
+              additionalProperties: false
+              description: When every provider of a role is rate limited, the attempt pauses (keeping its workspace) instead of blocking.
+          required:
+            - max_repair_rounds
+            - similar_tickets
+          additionalProperties: false
+          description: Job execution limits and policies.
+        build_profiles:
+          type: object
+          propertyNames:
+            type: string
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+          additionalProperties:
+            type: object
+            properties:
+              jdk:
+                type: string
+                pattern: ^(?:1[7-9]|[2-9][0-9])$
+                description: JDK major version for agents and checks (from the installed toolchains). The branch map may override it per project.
+              tomcat:
+                type: string
+                pattern: ^(?:[7-9]|1[0-9])\.[0-9]{1,2}\.[0-9]{1,3}$
+                description: Tomcat version (requires a JDK). The branch map may override it per project.
+              checks:
+                minItems: 1
+                type: array
+                items:
+                  type: object
+                  properties:
+                    executable:
+                      type: string
+                      minLength: 1
+                      description: Program to run (argument array, never a shell string).
+                    args:
+                      type: array
+                      items:
+                        type: string
+                      description: Arguments, one string each.
+                    timeout_ms:
+                      type: integer
+                      exclusiveMinimum: 0
+                      maximum: 3600000
+                      description: Timeout of the command in milliseconds.
+                    required:
+                      default: true
+                      type: boolean
+                      description: A failing required check blocks READY_FOR_HUMAN; an optional one is reported only.
+                  required:
+                    - executable
+                    - args
+                    - timeout_ms
+                  additionalProperties: false
+                description: Check commands run by trusted code in a network-less container; their exit codes are the evidence.
+            required:
+              - checks
+            additionalProperties: false
+            description: One build profile.
+          description: "Named build profiles referenced by repositories: the deterministic checks and toolchain."
+        precedents:
+          type: object
+          properties:
+            enabled:
+              default: false
+              type: boolean
+              description: Build and maintain the index. Jobs use it only when source is semantic.
+            source:
+              default: legacy
+              type: string
+              enum:
+                - legacy
+                - semantic
+              description: legacy = jobs keep the legacy lookup (the index can still be built and searched for evaluation); semantic = jobs use semantic precedents.
+            lineages:
+              default: []
+              maxItems: 20
+              type: array
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                    description: Short lineage name.
+                  repository:
+                    type: object
+                    properties:
+                      workspace:
+                        type: string
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                        description: Bitbucket workspace ID.
+                      repository_slug:
+                        type: string
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9_-]*$
+                        description: Repository slug.
+                    required:
+                      - workspace
+                      - repository_slug
+                    additionalProperties: false
+                    description: The lineage's repository; must be in bitbucket.allowed_repositories.
+                  root_branch:
+                    type: string
+                    minLength: 1
+                    maxLength: 200
+                    description: The base branch every project branch was cut from (fork points are computed against it).
+                  scan_branches:
+                    default:
+                      - "**"
+                    minItems: 1
+                    type: array
+                    items:
+                      type: string
+                      minLength: 1
+                      maxLength: 200
+                      pattern: ^[A-Za-z0-9._/*{}-]+$
+                    description: Branch globs scanned for fix commits (`**` matches names containing /). Dev and sandbox branches are included.
+                  ignore_branches:
+                    default: []
+                    type: array
+                    items:
+                      type: string
+                      minLength: 1
+                      maxLength: 200
+                      pattern: ^[A-Za-z0-9._/*{}-]+$
+                    description: Branch globs excluded from the fix scan.
+                  branch_codes:
+                    default: {}
+                    type: object
+                    propertyNames:
+                      type: string
+                      pattern: ^[A-Z][A-Z0-9]*$
+                    additionalProperties:
+                      type: string
+                      pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$
+                      description: Branch code of the project (the prefix of its _dev and _sbx branches).
+                    description: Jira project key → branch code, for projects whose `<code>_dev` / `<code>_sbx` branches cannot be matched by name or ancestry.
+                required:
+                  - id
+                  - repository
+                  - root_branch
+                additionalProperties: false
+              description: "Code lineages: one base repository and the project branches cut from it. Lineages never share evidence."
+            max_results:
+              default: 3
+              type: integer
+              minimum: 1
+              maximum: 5
+              description: Fix precedents shown per job in precedents.md and prompts (1 to 5).
+            index:
+              default: {}
+              type: object
+              properties:
+                db_file:
+                  default: precedents.sqlite
+                  type: string
+                  pattern: ^[A-Za-z0-9._-]+\.sqlite$
+                  description: Index file name inside storage.data_dir (mode 0600).
+                mirrors_dir:
+                  default: mirrors
+                  type: string
+                  pattern: ^[A-Za-z0-9._-]+$
+                  description: Directory inside storage.data_dir for read-only bare repository mirrors.
+                window_weeks:
+                  default: 104
+                  type: integer
+                  minimum: 1
+                  maximum: 1040
+                  description: Index tickets updated within this many weeks (104 ≈ 2 years); older ones are purged on reconcile.
+                exclude_projects:
+                  default: []
+                  type: array
+                  items:
+                    type: string
+                    pattern: ^[A-Z][A-Z0-9]*$
+                  description: Jira projects never indexed.
+                include_comments:
+                  default: true
+                  type: boolean
+                  description: Index non-bot comments (used for ranking only; comments never reach prompts).
+                auto_sync:
+                  default: true
+                  type: boolean
+                  description: "Run the background index loop in `controller start`. False: only `autos index sync`."
+                sync_interval_minutes:
+                  default: 15
+                  type: integer
+                  minimum: 1
+                  maximum: 1440
+                  description: Minutes between incremental Jira syncs.
+                reconcile_interval_hours:
+                  default: 24
+                  type: integer
+                  minimum: 1
+                  maximum: 168
+                  description: Hours between reconciles that remove deleted, moved, restricted or out-of-window issues.
+                overlap_minutes:
+                  default: 1440
+                  type: integer
+                  minimum: 10
+                  maximum: 2880
+                  description: Re-read window for incremental sync. Jira reads JQL dates in the API user's time zone, so keep it at least a day unless that user is on UTC.
+                max_requests_per_run:
+                  default: 5000
+                  type: integer
+                  minimum: 10
+                  maximum: 100000
+                  description: Jira request budget per sync run; a longer sync resumes on the next run.
+                min_request_interval_ms:
+                  default: 250
+                  type: integer
+                  minimum: 0
+                  maximum: 10000
+                  description: Minimum spacing between Jira requests.
+              additionalProperties: false
+              description: The local index (`<storage.data_dir>/<db_file>`) and its Jira sync.
+            embedding:
+              default: {}
+              type: object
+              properties:
+                provider:
+                  default: none
+                  type: string
+                  enum:
+                    - none
+                    - ollama
+                  description: none = keyword and error-signature search only; ollama = local Ollama server.
+                url:
+                  default: http://127.0.0.1:11434
+                  type: string
+                  description: "Ollama base URL: http on loopback or a single-label Compose service name only."
+                model:
+                  type: string
+                  pattern: ^[A-Za-z0-9._:/-]{1,100}$
+                  description: Ollama embedding model (required for ollama), for example qwen3-embedding:0.6b or bge-m3.
+                dimensions:
+                  type: integer
+                  minimum: 8
+                  maximum: 8192
+                  description: Vector size of the model (required for ollama); checked against every response and the stored index.
+                batch_size:
+                  default: 32
+                  type: integer
+                  minimum: 1
+                  maximum: 256
+                  description: Texts per embedding request.
+                timeout_ms:
+                  default: 60000
+                  type: integer
+                  minimum: 1000
+                  maximum: 600000
+                  description: Timeout of one embedding request.
+              additionalProperties: false
+              description: Embedding model for semantic similarity. Runs locally; ticket text never leaves the host.
+            gate:
+              default: {}
+              type: object
+              properties:
+                semantic_threshold:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                  description: Minimum semantic similarity (0 to 1) for the semantic signal to count.
+                strict_threshold:
+                  type: number
+                  minimum: 0
+                  maximum: 1
+                  description: Score (0 to 1) a candidate needs when the judge did not run.
+              additionalProperties: false
+              description: "Evidence-gate thresholds. Absent: calibrated defaults; recalibrate with real data."
+            judge:
+              default: {}
+              type: object
+              properties:
+                enabled:
+                  default: true
+                  type: boolean
+                  description: "Run the judge. False: no ticket text goes to a provider for precedents; the stricter threshold applies."
+                tier:
+                  type: string
+                  pattern: ^[a-z0-9][a-z0-9_-]{0,39}(?::[a-z]+)?$
+                  description: "Tier (or tier:effort) from model_tiers for the judge. Absent: the reviewer's lowest ladder tier, else the triage tier, else the reviewer's chain, at low effort."
+                max_candidates:
+                  default: 10
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  description: Candidates sent to the judge (1 to 10).
+                timeout_ms:
+                  default: 120000
+                  type: integer
+                  minimum: 10000
+                  maximum: 1800000
+                  description: Timeout of the judge call.
+              additionalProperties: false
+              description: '"Same defect?" check on the shortlisted candidates through the trusted runner (read-only sandbox, no repository). It can only drop candidates.'
+            prompt:
+              default: {}
+              type: object
+              properties:
+                roles:
+                  default: []
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - swe
+                      - reviewer
+                  description: "Roles that receive the block: swe (fix precedents with diff excerpts), reviewer (keys, summaries, files). Empty until accuracy has been measured. QA never receives it."
+                max_bytes:
+                  default: 20480
+                  type: integer
+                  minimum: 1024
+                  maximum: 65536
+                  description: Maximum size of the block.
+                per_precedent_diff_bytes:
+                  default: 6144
+                  type: integer
+                  minimum: 0
+                  maximum: 32768
+                  description: Maximum diff excerpt per precedent.
+              additionalProperties: false
+              description: Reference block of fix precedents in role prompts (untrusted, delimited, truncated first).
+            possibly_affected:
+              default: true
+              type: boolean
+              description: After READY_FOR_HUMAN, list open tickets and other project branches that may have the same bug ("May also affect").
+          additionalProperties: false
+          description: "Semantic precedent search across all branch-map Jira projects and code lineages (docs/semantic-precedents-plan.md). Absent: the legacy jobs.similar_tickets lookup."
+        security:
+          type: object
+          properties:
+            allow_jira_write:
+              type: boolean
+              description: Must be false.
+              enum:
+                - false
+            allow_confluence_write:
+              type: boolean
+              description: Must be false (fix-document drafts are governed separately by confluence.drafts).
+              enum:
+                - false
+            allow_merge:
+              type: boolean
+              description: Must be false. Autos never merges.
+              enum:
+                - false
+            allow_deploy:
+              type: boolean
+              description: Must be false. Autos never deploys.
+              enum:
+                - false
+            allow_prod_db:
+              type: boolean
+              description: Must be false. Autos never touches production databases.
+              enum:
+                - false
+          required:
+            - allow_jira_write
+            - allow_confluence_write
+            - allow_merge
+            - allow_deploy
+            - allow_prod_db
+          additionalProperties: false
+          description: Fixed safety switches. Every value must be false.
+        storage:
+          type: object
+          properties:
+            data_dir:
+              type: string
+              minLength: 1
+              description: SQLite databases, supervisor socket, precedent index and mirrors.
+            artifacts_dir:
+              type: string
+              minLength: 1
+              description: Evidence per attempt (never pruned automatically).
+            workspaces_dir:
+              type: string
+              minLength: 1
+              description: Git workspaces per attempt (pruned by the retention policy).
+          required:
+            - data_dir
+            - artifacts_dir
+            - workspaces_dir
+          additionalProperties: false
+          description: Local directories (dedicated, distinct and non-overlapping; created with mode 0700).
+        api:
+          type: object
+          properties:
+            listen_host:
+              type: string
+              enum:
+                - 127.0.0.1
+                - ::1
+              description: "Loopback address to bind: 127.0.0.1 or ::1. Only the container override AUTOS_CONTAINER_BIND_HOST may widen it."
+            port:
+              type: integer
+              minimum: 1024
+              maximum: 65535
+              description: TCP port (1024 to 65535).
+            operator_token_env:
+              type: string
+              pattern: ^[A-Z][A-Z0-9_]*$
+              description: Environment variable holding the bearer token (at least 16 characters).
+          required:
+            - listen_host
+            - port
+            - operator_token_env
+          additionalProperties: false
+          description: Operator HTTP API.
+        notifications:
+          type: object
+          properties:
+            teams:
+              type: object
+              properties:
+                webhook_url_env:
+                  type: string
+                  pattern: ^[A-Z][A-Z0-9_]*$
+                  description: Environment variable holding the webhook URL (it carries a signature, so it is a secret).
+                notify:
+                  default:
+                    - READY_FOR_HUMAN
+                    - BLOCKED
+                    - PAUSED
+                    - AUTOS_UP
+                    - AUTOS_DOWN
+                  minItems: 1
+                  type: array
+                  items:
+                    type: string
+                    enum:
+                      - READY_FOR_HUMAN
+                      - BLOCKED
+                      - CANCELLED
+                      - PLANNED
+                      - PAUSED
+                      - TIER_ESCALATED
+                      - PROVIDER_GATE
+                      - AUTOS_UP
+                      - AUTOS_DOWN
+                      - AGENT_PROGRESS
+                  description: "Card kinds to post: READY_FOR_HUMAN, BLOCKED, CANCELLED, PLANNED, PAUSED, TIER_ESCALATED, PROVIDER_GATE, AUTOS_UP, AUTOS_DOWN, AGENT_PROGRESS (opt-in, rate limited)."
+                include_commands:
+                  default: true
+                  type: boolean
+                  description: Add copyable `autos …` follow-up commands to each card.
+                payload:
+                  default: message
+                  type: string
+                  enum:
+                    - message
+                    - card
+                  description: message = wrap the card in a message with attachments (Microsoft's "Send webhook alerts" template); card = send the Adaptive Card itself.
+                auth:
+                  type: object
+                  properties:
+                    tenant_id:
+                      type: string
+                      pattern: ^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$
+                      description: Entra tenant ID (GUID).
+                    client_id:
+                      type: string
+                      pattern: ^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$
+                      description: Entra application (client) ID (GUID).
+                    client_secret_env:
+                      type: string
+                      pattern: ^[A-Z][A-Z0-9_]*$
+                      description: Environment variable holding the client secret.
+                    cloud:
+                      default: public
+                      type: string
+                      enum:
+                        - public
+                        - gcc
+                        - gcch
+                        - dod
+                        - china
+                      description: "Microsoft cloud: public, gcc, gcch, dod or china."
+                  required:
+                    - tenant_id
+                    - client_id
+                    - client_secret_env
+                  additionalProperties: false
+                  description: Sign posts with a Microsoft Entra ID app token (client credentials) for tenants that do not allow anonymous webhooks.
+              required:
+                - webhook_url_env
+              additionalProperties: false
+              description: Microsoft Teams cards through a Workflows webhook, posted by `autos teams relay`. Cards carry only facts Autos authored, never ticket text, notes, diffs or provider output.
+          additionalProperties: false
+          description: Optional notifications.
+        knowledge:
+          type: object
+          properties:
+            enabled:
+              default: false
+              type: boolean
+              description: Turn the tools on.
+            roles:
+              default:
+                - swe
+                - qa
+                - reviewer
+              minItems: 1
+              maxItems: 3
+              type: array
+              items:
+                type: string
+                enum:
+                  - swe
+                  - qa
+                  - reviewer
+              description: Roles that get the tools.
+            gateway:
+              default: {}
+              type: object
+              properties:
+                listen_host:
+                  default: 127.0.0.1
+                  type: string
+                  pattern: ^(?:[0-9]{1,3}(?:\.[0-9]{1,3}){3}|::1)$
+                  description: Address the gateway binds. Loopback works with Docker Desktop; on Linux bind the Docker bridge gateway address.
+                port:
+                  default: 8791
+                  type: integer
+                  minimum: 1024
+                  maximum: 65535
+                  description: Gateway port.
+                advertise_url:
+                  default: http://host.docker.internal:8791
+                  type: string
+                  pattern: ^https?:\/\/[A-Za-z0-9.\-[\]:]+\/?$
+                  description: URL agent containers use to reach the gateway (plain http is fine; it never leaves the host).
+              additionalProperties: false
+              description: Gateway network settings.
+            jira:
+              default: {}
+              type: object
+              properties:
+                projects:
+                  minItems: 1
+                  maxItems: 100
+                  type: array
+                  items:
+                    type: string
+                    pattern: ^[A-Z][A-Z0-9]*$
+                  description: "Readable Jira projects. Absent: jira.allowed_projects."
+              additionalProperties: false
+              description: Jira scope for agent tools.
+            confluence:
+              default: {}
+              type: object
+              properties:
+                spaces:
+                  default: []
+                  maxItems: 200
+                  type: array
+                  items:
+                    type: string
+                    pattern: ^~?[A-Za-z0-9]{1,255}$
+                  description: Readable Confluence space keys.
+                pages:
+                  default: []
+                  maxItems: 200
+                  type: array
+                  items:
+                    type: string
+                    pattern: ^[0-9]{1,20}$
+                  description: "Readable page trees: each page ID and all of its descendants."
+              additionalProperties: false
+              description: Confluence scope for agent tools.
+            limits:
+              default: {}
+              type: object
+              properties:
+                max_calls_per_run:
+                  default: 80
+                  type: integer
+                  minimum: 1
+                  maximum: 1000
+                  description: Tool calls per role run.
+                max_result_chars:
+                  default: 40000
+                  type: integer
+                  minimum: 1000
+                  maximum: 200000
+                  description: Characters returned by one call.
+                max_total_chars_per_run:
+                  default: 600000
+                  type: integer
+                  minimum: 1000
+                  maximum: 5000000
+                  description: Characters returned across one role run.
+                max_attachment_bytes:
+                  default: 5242880
+                  type: integer
+                  minimum: 1024
+                  maximum: 20971520
+                  description: Largest attachment an agent may read.
+                search_results:
+                  default: 10
+                  type: integer
+                  minimum: 1
+                  maximum: 25
+                  description: Results per search call.
+              additionalProperties: false
+              description: Budgets per role run.
+          additionalProperties: false
+          description: Optional read-only Jira/Confluence tools for agents through the host knowledge gateway (MCP shim in each container, per-run token).
+      required:
+        - schema_version
+        - jira
+        - confluence
+        - bitbucket
+        - git
+        - providers
+        - agents
+        - jobs
+        - build_profiles
+        - security
+        - storage
+        - api
+      additionalProperties: false
+      description: "Autos configuration file (`config/config.yaml`, YAML). Validated at startup; unknown keys are rejected. Secrets are never stored here: every `*_env` setting names an environment variable that holds the value. Cross-field rules (for example storage directories must be distinct, lineage repositories must be allowlisted, a role needs exactly one of provider or ladder) are enforced at load time and not expressible in this schema."
 paths:
   /health:
     get:
@@ -9989,6 +11266,2817 @@ paths:
               example:
                 events: []
                 next_after: 0
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+  /v1/index/status:
+    get:
+      operationId: getIndexStatus
+      summary: Get precedent index status
+      tags:
+        - operator
+      description: Index counts and sync times, the background loop of `controller start` (precedents.index.auto_sync) and the running or most recent manual operation. 404 (`NOT_FOUND`) when the precedent index is not configured.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  index:
+                    type: object
+                    additionalProperties: false
+                    properties:
+                      enabled:
+                        type: boolean
+                      source:
+                        type: string
+                        enum:
+                          - legacy
+                          - semantic
+                      ready:
+                        type: boolean
+                      issues:
+                        type: integer
+                        minimum: 0
+                      chunks:
+                        type: integer
+                        minimum: 0
+                      vectors:
+                        type: integer
+                        minimum: 0
+                      fixes:
+                        type: integer
+                        minimum: 0
+                      projects:
+                        type: array
+                        items:
+                          type: string
+                      embedding_model:
+                        type:
+                          - string
+                          - "null"
+                      last_sync_at:
+                        type:
+                          - string
+                          - "null"
+                        format: date-time
+                      last_full_sync_at:
+                        type:
+                          - string
+                          - "null"
+                        format: date-time
+                      last_reconcile_at:
+                        type:
+                          - string
+                          - "null"
+                        format: date-time
+                      last_mirror_scan_at:
+                        type:
+                          - string
+                          - "null"
+                        format: date-time
+                      last_error_code:
+                        type:
+                          - string
+                          - "null"
+                      running:
+                        type: boolean
+                    required:
+                      - enabled
+                      - source
+                      - ready
+                      - issues
+                      - chunks
+                      - vectors
+                      - fixes
+                      - projects
+                      - embedding_model
+                      - last_sync_at
+                      - last_full_sync_at
+                      - last_reconcile_at
+                      - last_mirror_scan_at
+                      - last_error_code
+                      - running
+                  auto_sync:
+                    type: boolean
+                    description: "precedents.index.auto_sync: whether `controller start` runs the background index loop."
+                  loop:
+                    type: object
+                    additionalProperties: false
+                    properties:
+                      active:
+                        type: boolean
+                      last_tick_at:
+                        type:
+                          - string
+                          - "null"
+                        format: date-time
+                      last_tick_error_code:
+                        type:
+                          - string
+                          - "null"
+                      ticks:
+                        type: integer
+                        minimum: 0
+                    required:
+                      - active
+                      - last_tick_at
+                      - last_tick_error_code
+                      - ticks
+                  operation:
+                    type:
+                      - object
+                      - "null"
+                    additionalProperties: false
+                    description: The running or most recent manual index operation (sync or rebuild) of this controller process.
+                    properties:
+                      kind:
+                        type: string
+                        enum:
+                          - sync
+                          - rebuild
+                      full:
+                        type: boolean
+                      reconcile:
+                        type: boolean
+                      running:
+                        type: boolean
+                      started_at:
+                        type: string
+                        format: date-time
+                      finished_at:
+                        type:
+                          - string
+                          - "null"
+                        format: date-time
+                      reports:
+                        type: array
+                        items:
+                          type: object
+                          additionalProperties: false
+                          properties:
+                            mode:
+                              type: string
+                              enum:
+                                - incremental
+                                - full
+                                - reconcile
+                                - rebuild
+                                - mirrors
+                            started_at:
+                              type: string
+                              format: date-time
+                            finished_at:
+                              type: string
+                              format: date-time
+                            issues_upserted:
+                              type: integer
+                              minimum: 0
+                            issues_deleted:
+                              type: integer
+                              minimum: 0
+                            chunks_embedded:
+                              type: integer
+                              minimum: 0
+                            fixes_found:
+                              type: integer
+                              minimum: 0
+                            requests:
+                              type: integer
+                              minimum: 0
+                            complete:
+                              type: boolean
+                            error_code:
+                              type:
+                                - string
+                                - "null"
+                          required:
+                            - mode
+                            - started_at
+                            - finished_at
+                            - issues_upserted
+                            - issues_deleted
+                            - chunks_embedded
+                            - fixes_found
+                            - requests
+                            - complete
+                            - error_code
+                      error_code:
+                        type:
+                          - string
+                          - "null"
+                    required:
+                      - kind
+                      - full
+                      - reconcile
+                      - running
+                      - started_at
+                      - finished_at
+                      - reports
+                      - error_code
+                required:
+                  - index
+                  - auto_sync
+                  - loop
+                  - operation
+              example:
+                index:
+                  enabled: true
+                  source: semantic
+                  ready: true
+                  issues: 1200
+                  chunks: 3400
+                  vectors: 3400
+                  fixes: 310
+                  projects:
+                    - SAMPLE
+                  embedding_model: example-embed:0.6b
+                  last_sync_at: 2026-11-12T11:45:00.000Z
+                  last_full_sync_at: 2026-11-10T02:00:00.000Z
+                  last_reconcile_at: 2026-11-12T02:00:00.000Z
+                  last_mirror_scan_at: 2026-11-12T11:45:00.000Z
+                  last_error_code: null
+                  running: false
+                auto_sync: true
+                loop:
+                  active: true
+                  last_tick_at: 2026-11-12T11:59:00.000Z
+                  last_tick_error_code: null
+                  ticks: 42
+                operation: null
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+  /v1/index/sync:
+    post:
+      operationId: syncIndex
+      summary: Start a precedent index sync
+      tags:
+        - operator
+      description: "Incremental Jira sync (`full`: re-read the whole window; `reconcile`: also purge issues that were deleted, moved or became restricted), mirror scan and lineage recompute. Read-only towards Jira and Bitbucket. Runs in the background (one index operation at a time, shared with the background loop); follow it with GET /v1/index/status. 409 when another index operation is running or precedents.enabled is false. 404 (`NOT_FOUND`) when the precedent index is not configured."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                full:
+                  type: boolean
+                  default: false
+                reconcile:
+                  type: boolean
+                  default: false
+            example:
+              full: false
+              reconcile: true
+      parameters:
+        - schema:
+            type: string
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+          in: header
+          name: x-autos-operator
+          required: false
+          description: Optional audit label (not authentication). Defaults to operator.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: The running or most recent manual index operation (sync or rebuild) of this controller process.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                description: The running or most recent manual index operation (sync or rebuild) of this controller process.
+                properties:
+                  kind:
+                    type: string
+                    enum:
+                      - sync
+                      - rebuild
+                  full:
+                    type: boolean
+                  reconcile:
+                    type: boolean
+                  running:
+                    type: boolean
+                  started_at:
+                    type: string
+                    format: date-time
+                  finished_at:
+                    type:
+                      - string
+                      - "null"
+                    format: date-time
+                  reports:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      properties:
+                        mode:
+                          type: string
+                          enum:
+                            - incremental
+                            - full
+                            - reconcile
+                            - rebuild
+                            - mirrors
+                        started_at:
+                          type: string
+                          format: date-time
+                        finished_at:
+                          type: string
+                          format: date-time
+                        issues_upserted:
+                          type: integer
+                          minimum: 0
+                        issues_deleted:
+                          type: integer
+                          minimum: 0
+                        chunks_embedded:
+                          type: integer
+                          minimum: 0
+                        fixes_found:
+                          type: integer
+                          minimum: 0
+                        requests:
+                          type: integer
+                          minimum: 0
+                        complete:
+                          type: boolean
+                        error_code:
+                          type:
+                            - string
+                            - "null"
+                      required:
+                        - mode
+                        - started_at
+                        - finished_at
+                        - issues_upserted
+                        - issues_deleted
+                        - chunks_embedded
+                        - fixes_found
+                        - requests
+                        - complete
+                        - error_code
+                  error_code:
+                    type:
+                      - string
+                      - "null"
+                required:
+                  - kind
+                  - full
+                  - reconcile
+                  - running
+                  - started_at
+                  - finished_at
+                  - reports
+                  - error_code
+              example:
+                kind: sync
+                full: false
+                reconcile: false
+                running: true
+                started_at: 2026-11-12T12:00:00.000Z
+                finished_at: null
+                reports: []
+                error_code: null
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+  /v1/index/rebuild:
+    post:
+      operationId: rebuildIndex
+      summary: Rebuild the precedent index from scratch
+      tags:
+        - operator
+      description: Discards the local index (ticket text, embeddings, fix links) and rebuilds it; search returns INDEX_NOT_READY until it finishes. Mirrors are kept. Runs in the background (one index operation at a time, shared with the background loop); follow it with GET /v1/index/status. 409 when another index operation is running or precedents.enabled is false. 404 (`NOT_FOUND`) when the precedent index is not configured.
+      parameters:
+        - schema:
+            type: string
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+          in: header
+          name: x-autos-operator
+          required: false
+          description: Optional audit label (not authentication). Defaults to operator.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: The running or most recent manual index operation (sync or rebuild) of this controller process.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                description: The running or most recent manual index operation (sync or rebuild) of this controller process.
+                properties:
+                  kind:
+                    type: string
+                    enum:
+                      - sync
+                      - rebuild
+                  full:
+                    type: boolean
+                  reconcile:
+                    type: boolean
+                  running:
+                    type: boolean
+                  started_at:
+                    type: string
+                    format: date-time
+                  finished_at:
+                    type:
+                      - string
+                      - "null"
+                    format: date-time
+                  reports:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      properties:
+                        mode:
+                          type: string
+                          enum:
+                            - incremental
+                            - full
+                            - reconcile
+                            - rebuild
+                            - mirrors
+                        started_at:
+                          type: string
+                          format: date-time
+                        finished_at:
+                          type: string
+                          format: date-time
+                        issues_upserted:
+                          type: integer
+                          minimum: 0
+                        issues_deleted:
+                          type: integer
+                          minimum: 0
+                        chunks_embedded:
+                          type: integer
+                          minimum: 0
+                        fixes_found:
+                          type: integer
+                          minimum: 0
+                        requests:
+                          type: integer
+                          minimum: 0
+                        complete:
+                          type: boolean
+                        error_code:
+                          type:
+                            - string
+                            - "null"
+                      required:
+                        - mode
+                        - started_at
+                        - finished_at
+                        - issues_upserted
+                        - issues_deleted
+                        - chunks_embedded
+                        - fixes_found
+                        - requests
+                        - complete
+                        - error_code
+                  error_code:
+                    type:
+                      - string
+                      - "null"
+                required:
+                  - kind
+                  - full
+                  - reconcile
+                  - running
+                  - started_at
+                  - finished_at
+                  - reports
+                  - error_code
+              example:
+                kind: sync
+                full: false
+                reconcile: false
+                running: true
+                started_at: 2026-11-12T12:00:00.000Z
+                finished_at: null
+                reports: []
+                error_code: null
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+  /v1/index/purge:
+    post:
+      operationId: purgeIndexProject
+      summary: Purge one Jira project from the precedent index
+      tags:
+        - operator
+      description: Immediately deletes every indexed issue of the project (text, comments, embeddings). Add the project to precedents.index.exclude_projects to keep it out of later syncs. 404 (`NOT_FOUND`) when the precedent index is not configured.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                project_key:
+                  type: string
+                  pattern: ^[A-Z][A-Z0-9]*$
+              required:
+                - project_key
+            example:
+              project_key: SAMPLE
+      parameters:
+        - schema:
+            type: string
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+          in: header
+          name: x-autos-operator
+          required: false
+          description: Optional audit label (not authentication). Defaults to operator.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  project_key:
+                    type: string
+                    pattern: ^[A-Z][A-Z0-9]*$
+                  issues_deleted:
+                    type: integer
+                    minimum: 0
+                required:
+                  - project_key
+                  - issues_deleted
+              example:
+                project_key: SAMPLE
+                issues_deleted: 12
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+  /v1/lineage:
+    get:
+      operationId: getLineage
+      summary: Show the code lineages
+      tags:
+        - operator
+      description: Lineage nodes (Jira project, development branch, fork point from the root branch, attached dev/sbx branches), plus branches that could not be attached and configured items that were not found. 404 (`NOT_FOUND`) when the precedent index is not configured.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  nodes:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      properties:
+                        lineage_id:
+                          type: string
+                        project_key:
+                          type: string
+                          pattern: ^[A-Z][A-Z0-9]*$
+                        branch:
+                          type: string
+                        fork_point:
+                          type: string
+                          pattern: ^[a-f0-9]{40}$
+                        fork_date:
+                          type: string
+                          format: date-time
+                        side_branches:
+                          type: array
+                          items:
+                            type: object
+                            additionalProperties: false
+                            properties:
+                              branch:
+                                type: string
+                              kind:
+                                type: string
+                                enum:
+                                  - dev
+                                  - sbx
+                              method:
+                                type: string
+                                enum:
+                                  - name
+                                  - ancestry
+                                  - override
+                            required:
+                              - branch
+                              - kind
+                              - method
+                      required:
+                        - lineage_id
+                        - project_key
+                        - branch
+                        - fork_point
+                        - fork_date
+                        - side_branches
+                  unattached:
+                    type: array
+                    items:
+                      type: string
+                    description: Branches that could not be attached to a lineage node.
+                  missing:
+                    type: array
+                    items:
+                      type: string
+                    description: Configured projects or branches that were not found.
+                required:
+                  - nodes
+                  - unattached
+                  - missing
+              example:
+                nodes: []
+                unattached: []
+                missing: []
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+  /v1/precedents/search:
+    post:
+      operationId: searchPrecedents
+      summary: Search precedents for an issue or free text
+      tags:
+        - operator
+      description: "Runs the retrieval pipeline (candidates, evidence gate, optional judge) for an indexed issue (`issue_key`) or free text (`text`; exactly one). `judge: false` skips the provider judge; `explain` adds per-candidate records. The request text is never logged. 409 when precedents.enabled is false. 404 (`NOT_FOUND`) when the precedent index is not configured."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                issue_key:
+                  type: string
+                  pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                text:
+                  type: string
+                  minLength: 3
+                  maxLength: 4000
+                limit:
+                  type: integer
+                  minimum: 1
+                  maximum: 20
+                include_unresolved:
+                  type: boolean
+                  default: false
+                judge:
+                  type: boolean
+                  default: true
+                explain:
+                  type: boolean
+                  default: false
+            example:
+              issue_key: SAMPLE-123
+              limit: 5
+              judge: false
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  result:
+                    type: object
+                    additionalProperties: false
+                    properties:
+                      schema_version:
+                        type: integer
+                        enum:
+                          - 1
+                      outcome:
+                        type: string
+                        enum:
+                          - FOUND
+                          - NO_MATCH
+                          - DISABLED
+                          - INDEX_NOT_READY
+                      judge:
+                        type: string
+                        enum:
+                          - RAN
+                          - NOT_RUN
+                          - SKIPPED
+                      items:
+                        type: array
+                        maxItems: 5
+                        items:
+                          type: object
+                          additionalProperties: false
+                          properties:
+                            issue_key:
+                              type: string
+                              pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                            issue_url:
+                              type: string
+                              format: uri
+                            project_key:
+                              type: string
+                              pattern: ^[A-Z][A-Z0-9]*$
+                            summary:
+                              type: string
+                              maxLength: 300
+                            status:
+                              type: string
+                              maxLength: 100
+                            resolution:
+                              type:
+                                - string
+                                - "null"
+                              maxLength: 100
+                            kind:
+                              type: string
+                              enum:
+                                - ALSO_REPORTED
+                                - FIXED_IN_RELATIVE
+                                - ALREADY_PRESENT_HERE
+                                - RELATED_FIX
+                            score:
+                              type: number
+                              minimum: 0
+                              maximum: 1
+                            signals:
+                              type: array
+                              minItems: 1
+                              items:
+                                type: string
+                                enum:
+                                  - semantic
+                                  - keyword
+                                  - error_signature
+                                  - code_overlap
+                                  - lineage
+                                  - jira_link
+                                  - near_duplicate
+                                  - patch_id
+                                  - autos_merged
+                            judge:
+                              type:
+                                - object
+                                - "null"
+                              additionalProperties: false
+                              properties:
+                                verdict:
+                                  type: string
+                                  enum:
+                                    - yes
+                                    - likely
+                                confidence:
+                                  type: number
+                                  minimum: 0
+                                  maximum: 1
+                              required:
+                                - verdict
+                                - confidence
+                            fix:
+                              type:
+                                - object
+                                - "null"
+                              additionalProperties: false
+                              properties:
+                                lineage_id:
+                                  type: string
+                                branch:
+                                  type: string
+                                commit_shas:
+                                  type: array
+                                  minItems: 1
+                                  maxItems: 5
+                                  items:
+                                    type: string
+                                    pattern: ^[a-f0-9]{40}$
+                                patch_id:
+                                  type:
+                                    - string
+                                    - "null"
+                                  pattern: ^[a-f0-9]{40}$
+                                evidence_url:
+                                  type: string
+                                  format: uri
+                                files:
+                                  type: array
+                                  maxItems: 50
+                                  items:
+                                    type: string
+                                diff_excerpt:
+                                  type:
+                                    - string
+                                    - "null"
+                                applies_cleanly:
+                                  type:
+                                    - boolean
+                                    - "null"
+                                inherited:
+                                  type:
+                                    - boolean
+                                    - "null"
+                                ported_to:
+                                  type: array
+                                  items:
+                                    type: string
+                              required:
+                                - lineage_id
+                                - branch
+                                - commit_shas
+                                - patch_id
+                                - evidence_url
+                                - files
+                                - diff_excerpt
+                                - applies_cleanly
+                                - inherited
+                                - ported_to
+                            caveats:
+                              type: array
+                              items:
+                                type: string
+                          required:
+                            - issue_key
+                            - issue_url
+                            - project_key
+                            - summary
+                            - status
+                            - resolution
+                            - kind
+                            - score
+                            - signals
+                            - judge
+                            - fix
+                            - caveats
+                      also_reported:
+                        type: array
+                        maxItems: 10
+                        items:
+                          type: object
+                          additionalProperties: false
+                          properties:
+                            issue_key:
+                              type: string
+                              pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                            issue_url:
+                              type: string
+                              format: uri
+                            project_key:
+                              type: string
+                              pattern: ^[A-Z][A-Z0-9]*$
+                            summary:
+                              type: string
+                              maxLength: 300
+                            status:
+                              type: string
+                              maxLength: 100
+                            resolution:
+                              type:
+                                - string
+                                - "null"
+                              maxLength: 100
+                            kind:
+                              type: string
+                              enum:
+                                - ALSO_REPORTED
+                                - FIXED_IN_RELATIVE
+                                - ALREADY_PRESENT_HERE
+                                - RELATED_FIX
+                            score:
+                              type: number
+                              minimum: 0
+                              maximum: 1
+                            signals:
+                              type: array
+                              minItems: 1
+                              items:
+                                type: string
+                                enum:
+                                  - semantic
+                                  - keyword
+                                  - error_signature
+                                  - code_overlap
+                                  - lineage
+                                  - jira_link
+                                  - near_duplicate
+                                  - patch_id
+                                  - autos_merged
+                            judge:
+                              type:
+                                - object
+                                - "null"
+                              additionalProperties: false
+                              properties:
+                                verdict:
+                                  type: string
+                                  enum:
+                                    - yes
+                                    - likely
+                                confidence:
+                                  type: number
+                                  minimum: 0
+                                  maximum: 1
+                              required:
+                                - verdict
+                                - confidence
+                            fix:
+                              type:
+                                - object
+                                - "null"
+                              additionalProperties: false
+                              properties:
+                                lineage_id:
+                                  type: string
+                                branch:
+                                  type: string
+                                commit_shas:
+                                  type: array
+                                  minItems: 1
+                                  maxItems: 5
+                                  items:
+                                    type: string
+                                    pattern: ^[a-f0-9]{40}$
+                                patch_id:
+                                  type:
+                                    - string
+                                    - "null"
+                                  pattern: ^[a-f0-9]{40}$
+                                evidence_url:
+                                  type: string
+                                  format: uri
+                                files:
+                                  type: array
+                                  maxItems: 50
+                                  items:
+                                    type: string
+                                diff_excerpt:
+                                  type:
+                                    - string
+                                    - "null"
+                                applies_cleanly:
+                                  type:
+                                    - boolean
+                                    - "null"
+                                inherited:
+                                  type:
+                                    - boolean
+                                    - "null"
+                                ported_to:
+                                  type: array
+                                  items:
+                                    type: string
+                              required:
+                                - lineage_id
+                                - branch
+                                - commit_shas
+                                - patch_id
+                                - evidence_url
+                                - files
+                                - diff_excerpt
+                                - applies_cleanly
+                                - inherited
+                                - ported_to
+                            caveats:
+                              type: array
+                              items:
+                                type: string
+                          required:
+                            - issue_key
+                            - issue_url
+                            - project_key
+                            - summary
+                            - status
+                            - resolution
+                            - kind
+                            - score
+                            - signals
+                            - judge
+                            - fix
+                            - caveats
+                      rejected:
+                        type: array
+                        maxItems: 50
+                        items:
+                          type: object
+                          additionalProperties: false
+                          properties:
+                            issue_key:
+                              type: string
+                              pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                            reason:
+                              type: string
+                              maxLength: 300
+                          required:
+                            - issue_key
+                            - reason
+                      checked:
+                        type: integer
+                        minimum: 0
+                      index:
+                        type:
+                          - object
+                          - "null"
+                        additionalProperties: false
+                        properties:
+                          as_of:
+                            type: string
+                            format: date-time
+                          issues:
+                            type: integer
+                            minimum: 0
+                          model:
+                            type: string
+                        required:
+                          - as_of
+                          - issues
+                          - model
+                    required:
+                      - schema_version
+                      - outcome
+                      - judge
+                      - items
+                      - also_reported
+                      - rejected
+                      - checked
+                      - index
+                  related:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      properties:
+                        issue_key:
+                          type: string
+                          pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                        issue_url:
+                          type: string
+                          format: uri
+                        project_key:
+                          type: string
+                          pattern: ^[A-Z][A-Z0-9]*$
+                        summary:
+                          type: string
+                          maxLength: 300
+                        status:
+                          type: string
+                          maxLength: 100
+                        resolution:
+                          type:
+                            - string
+                            - "null"
+                          maxLength: 100
+                        kind:
+                          type: string
+                          enum:
+                            - ALSO_REPORTED
+                            - FIXED_IN_RELATIVE
+                            - ALREADY_PRESENT_HERE
+                            - RELATED_FIX
+                        score:
+                          type: number
+                          minimum: 0
+                          maximum: 1
+                        signals:
+                          type: array
+                          minItems: 1
+                          items:
+                            type: string
+                            enum:
+                              - semantic
+                              - keyword
+                              - error_signature
+                              - code_overlap
+                              - lineage
+                              - jira_link
+                              - near_duplicate
+                              - patch_id
+                              - autos_merged
+                        judge:
+                          type:
+                            - object
+                            - "null"
+                          additionalProperties: false
+                          properties:
+                            verdict:
+                              type: string
+                              enum:
+                                - yes
+                                - likely
+                            confidence:
+                              type: number
+                              minimum: 0
+                              maximum: 1
+                          required:
+                            - verdict
+                            - confidence
+                        fix:
+                          type:
+                            - object
+                            - "null"
+                          additionalProperties: false
+                          properties:
+                            lineage_id:
+                              type: string
+                            branch:
+                              type: string
+                            commit_shas:
+                              type: array
+                              minItems: 1
+                              maxItems: 5
+                              items:
+                                type: string
+                                pattern: ^[a-f0-9]{40}$
+                            patch_id:
+                              type:
+                                - string
+                                - "null"
+                              pattern: ^[a-f0-9]{40}$
+                            evidence_url:
+                              type: string
+                              format: uri
+                            files:
+                              type: array
+                              maxItems: 50
+                              items:
+                                type: string
+                            diff_excerpt:
+                              type:
+                                - string
+                                - "null"
+                            applies_cleanly:
+                              type:
+                                - boolean
+                                - "null"
+                            inherited:
+                              type:
+                                - boolean
+                                - "null"
+                            ported_to:
+                              type: array
+                              items:
+                                type: string
+                          required:
+                            - lineage_id
+                            - branch
+                            - commit_shas
+                            - patch_id
+                            - evidence_url
+                            - files
+                            - diff_excerpt
+                            - applies_cleanly
+                            - inherited
+                            - ported_to
+                        caveats:
+                          type: array
+                          items:
+                            type: string
+                      required:
+                        - issue_key
+                        - issue_url
+                        - project_key
+                        - summary
+                        - status
+                        - resolution
+                        - kind
+                        - score
+                        - signals
+                        - judge
+                        - fix
+                        - caveats
+                    description: RELATED_FIX entries (operator search only; never given to agents).
+                  explain:
+                    type: array
+                    items: {}
+                    description: Per-candidate explain records when `explain` was requested; empty otherwise.
+                required:
+                  - result
+                  - related
+                  - explain
+              example:
+                result:
+                  schema_version: 1
+                  outcome: NO_MATCH
+                  judge: SKIPPED
+                  items: []
+                  also_reported: []
+                  rejected: []
+                  checked: 4
+                  index:
+                    as_of: 2026-11-12T11:45:00.000Z
+                    issues: 1200
+                    model: example-embed:0.6b
+                related: []
+                explain: []
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+  /v1/precedents/{issueKey}:
+    get:
+      operationId: getPrecedent
+      summary: Show one indexed issue
+      tags:
+        - operator
+      description: Indexed text summary, error signatures, code references, fixes and fix presence per lineage node for one issue. 404 when the issue is not in the index. 404 (`NOT_FOUND`) when the precedent index is not configured.
+      parameters:
+        - schema:
+            type: string
+            pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+          in: path
+          name: issueKey
+          required: true
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Index record (shape owned by the index; operator display only).
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                description: Index record (shape owned by the index; operator display only).
+        "400":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "401":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "403":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "404":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "409":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "422":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "429":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+        "500":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  code:
+                    type: string
+                  message:
+                    type: string
+                  request_id:
+                    type: string
+                    format: uuid
+                required:
+                  - code
+                  - message
+                  - request_id
+              example:
+                code: NOT_FOUND
+                message: Resource not found
+                request_id: 00000000-0000-4000-8000-000000000002
+  /v1/confluence-drafts:
+    post:
+      operationId: createConfluenceDraft
+      summary: Create a Confluence fix-document draft
+      tags:
+        - operator
+      description: "Creates (or refreshes while it is still an untouched draft) the Confluence fix-document draft of a READY_FOR_HUMAN attempt: `job_id`, or `issue_key` for the issue's latest READY_FOR_HUMAN attempt. The draft is unpublished and visible only to the Atlassian account whose token the controller uses; a person must review and publish it in Confluence. Autos never publishes, updates a published page or deletes anything. 404 (`NOT_FOUND`) when drafts are not configured (confluence.drafts.enabled) or the job/issue is unknown; 409 when the attempt is not READY_FOR_HUMAN."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                job_id:
+                  type: string
+                  format: uuid
+                issue_key:
+                  type: string
+                  pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+            example:
+              issue_key: SAMPLE-123
+      parameters:
+        - schema:
+            type: string
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.@-]{0,63}$
+          in: header
+          name: x-autos-operator
+          required: false
+          description: Optional audit label (not authentication). Defaults to operator.
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          description: Default Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  schema_version:
+                    type: integer
+                    enum:
+                      - 1
+                  job_id:
+                    type: string
+                  issue_key:
+                    type: string
+                    pattern: ^[A-Z][A-Z0-9]*-[1-9][0-9]*$
+                  draft:
+                    type: object
+                    additionalProperties: false
+                    properties:
+                      page_id:
+                        type: string
+                        pattern: ^[0-9]+$
+                      space_id:
+                        type: string
+                        pattern: ^[0-9]+$
+                      version:
+                        type: integer
+                        minimum: 1
+                      status:
+                        type: string
+                        enum:
+                          - draft
+                      edit_url:
+                        type: string
+                        format: uri
+                    required:
+                      - page_id
+                      - space_id
+                      - version
+                      - status
+                      - edit_url
+                  created_at:
+                    type: string
+                    format: date-time
+                  supersedes_page_id:
+                    type:
+                      - string
+                      - "null"
+                    pattern: ^[0-9]+$
+                required:
+                  - schema_version
+                  - job_id
+                  - issue_key
+                  - draft
+                  - created_at
+                  - supersedes_page_id
+              example:
+                schema_version: 1
+                job_id: 00000000-0000-4000-8000-000000000001
+                issue_key: SAMPLE-123
+                draft:
+                  page_id: "123456"
+                  space_id: "98765"
+                  version: 1
+                  status: draft
+                  edit_url: https://example.atlassian.net/wiki/pages/resumedraft.action?draftId=123456
+                created_at: 2026-11-12T12:00:00.000Z
+                supersedes_page_id: null
         "400":
           description: Default Response
           content:
